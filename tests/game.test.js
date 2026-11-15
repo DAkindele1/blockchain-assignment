@@ -7,7 +7,11 @@ import {
 const two = () =>
   newState({
     maxPoints: 50,
-    players: [{ name: "Ada", isBot: false }, { name: "Bo", isBot: false }],
+    players: [
+      { name: "Eno", isBot: false },
+      { name: "Segun", isBot: false },
+      { name: "David", isBot: false },
+    ],
   });
 
 test("rollDie only returns 1..6 and uses every face", () => {
@@ -116,7 +120,7 @@ test("validateNewGame rejects bad input", () => {
   }
 });
 
-// ---------- bot ----------
+// ---------- bot controls ----------
 import { botShouldHold, playBotTurn } from "../api/_lib/game.js";
 import { fixedRolls } from "./helpers.js";
 

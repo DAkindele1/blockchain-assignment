@@ -10,7 +10,6 @@ export default defineConfig({
     },
   },
   server: {
-    // During `npm run dev`, forward API calls to dev-server.js
     proxy: {
       "/api": "http://localhost:3001",
     },

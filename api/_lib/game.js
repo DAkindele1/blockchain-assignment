@@ -20,13 +20,17 @@ export function rollDie(rng = randomInt) {
 
 // ---------- validation ----------
 
+// EDITED (1 of 3): the control-character pattern is now a named constant.
+// Same regex, same replacement, same order of operations.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
 export function cleanName(raw) {
   if (typeof raw !== "string") {
     throw new HttpError(400, "Player names must be text.", "BAD_NAME");
   }
   const name = raw
     .normalize("NFC")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "") // control characters
+    .replace(CONTROL_CHARS, "") // control characters
     .replace(/\s+/g, " ")
     .trim();
   if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
@@ -50,6 +54,20 @@ function cleanAvatar(raw, fallback) {
 export function botName(difficulty) {
   const label = difficulty[0].toUpperCase() + difficulty.slice(1);
   return `Computer (${label})`;
+}
+
+// EDITED (2 of 3): the duplicate-name check is pulled out of
+// validateNewGame into its own helper. Same case-insensitive comparison,
+// same error message and code, and it still runs after the bot is added.
+function assertUniqueNames(players) {
+  const seen = new Set();
+  for (const p of players) {
+    const key = p.name.toLowerCase();
+    if (seen.has(key)) {
+      throw new HttpError(400, `Two players are both called "${p.name}". Give everyone a different name.`, "DUPLICATE_NAME");
+    }
+    seen.add(key);
+  }
 }
 
 // Validates and normalises the body of POST /api/games.
@@ -111,14 +129,7 @@ export function validateNewGame(body) {
     });
   }
 
-  const seen = new Set();
-  for (const p of players) {
-    const key = p.name.toLowerCase();
-    if (seen.has(key)) {
-      throw new HttpError(400, `Two players are both called "${p.name}". Give everyone a different name.`, "DUPLICATE_NAME");
-    }
-    seen.add(key);
-  }
+  assertUniqueNames(players);
 
   return { mode, difficulty, maxPoints, players };
 }
@@ -214,6 +225,10 @@ export function botShouldHold(difficulty, state, rng = randomInt) {
   return running >= threshold;
 }
 
+// EDITED (3 of 3): the safety cap on a bot turn is a named constant.
+// Same limit (100 iterations), same loop body and return value.
+const MAX_BOT_STEPS = 100;
+
 // Plays a whole bot turn. Returns the new state and every step so the browser
 // can replay it with animation: [{ type, value?, running, banked? }].
 export function playBotTurn(state, difficulty, rng = randomInt, roller = rollDie) {
@@ -224,7 +239,7 @@ export function playBotTurn(state, difficulty, rng = randomInt, roller = rollDie
   let current = state;
   const steps = [];
   const events = [];
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < MAX_BOT_STEPS; i++) {
     const { state: afterRoll, event } = applyRoll(current, roller(rng));
     current = afterRoll;
     events.push(event);
