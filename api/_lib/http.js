@@ -19,6 +19,12 @@ export function sendJson(res, status, body) {
 
 const MAX_BODY_BYTES = 10 * 1024;
 
+// EDITED (1 of 3): the duplicated "invalid JSON" error is built in one
+// helper. Same status (400), message and code (BAD_JSON).
+function badJsonError() {
+  return new HttpError(400, "Request body is not valid JSON.", "BAD_JSON");
+}
+
 // Vercel pre-parses JSON bodies into req.body. Locally we read the stream.
 export async function readJson(req) {
   if (req.body !== undefined && req.body !== null) {
@@ -26,7 +32,7 @@ export async function readJson(req) {
       try {
         return JSON.parse(req.body);
       } catch {
-        throw new HttpError(400, "Request body is not valid JSON.", "BAD_JSON");
+        throw badJsonError();
       }
     }
     return req.body;
@@ -44,9 +50,15 @@ export async function readJson(req) {
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
-    throw new HttpError(400, "Request body is not valid JSON.", "BAD_JSON");
+    throw badJsonError();
   }
 }
+
+// EDITED (2 of 3): the generic 500 response body is a named constant.
+// Same code (SERVER) and message.
+const SERVER_ERROR_BODY = {
+  error: { code: "SERVER", message: "Something went wrong on the server." },
+};
 
 // route({ GET: fn, POST: fn }) -> (req, res) handler with method checking
 // and uniform error responses: { error: { code, message } }
@@ -67,14 +79,14 @@ export function route(methods) {
         });
       } else {
         console.error("Unhandled API error:", err);
-        sendJson(res, 500, {
-          error: { code: "SERVER", message: "Something went wrong on the server." },
-        });
+        sendJson(res, 500, SERVER_ERROR_BODY);
       }
     }
   };
 }
 
+// EDITED (3 of 3): the UUID pattern is laid out as a commented, named
+// constant. Same regex, same case-insensitive flag.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

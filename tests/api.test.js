@@ -62,24 +62,29 @@ test("create -> roll -> hold works end to end", opts, async () => {
   assert.equal(g.status, 200);
 });
 
+// EDITED (1 of 3): assertion messages now say which endpoint and which
+// token case failed. Same calls, same expected status (403).
 test("rolling or holding without the right token is refused", opts, async () => {
   const api = await load();
   const { id } = await newGame(api);
-  for (const handler of [api.roll, api.hold]) {
+  for (const [name, handler] of [["roll", api.roll], ["hold", api.hold]]) {
     let r = await call(handler, { method: "POST", query: { id } });
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 403, `${name}: missing token should be refused`);
     r = await call(handler, { method: "POST", query: { id }, headers: { "x-game-token": "nope" } });
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 403, `${name}: wrong token should be refused`);
   }
 });
 
+// EDITED (2 of 3): the repeated nil UUID is pulled into one named constant.
+// Same inputs, same expected statuses (404, 404, 405, 400).
 test("bad ids, missing games and wrong methods give clean errors", opts, async () => {
   const api = await load();
+  const MISSING_ID = "00000000-0000-4000-8000-000000000000"; // valid UUID, no such game
   let r = await call(api.get, { query: { id: "not-a-uuid" } });
   assert.equal(r.status, 404);
-  r = await call(api.get, { query: { id: "00000000-0000-4000-8000-000000000000" } });
+  r = await call(api.get, { query: { id: MISSING_ID } });
   assert.equal(r.status, 404);
-  r = await call(api.roll, { method: "GET", query: { id: "00000000-0000-4000-8000-000000000000" } });
+  r = await call(api.roll, { method: "GET", query: { id: MISSING_ID } });
   assert.equal(r.status, 405);
   r = await call(api.create, { method: "POST", body: { players: [{ name: "Only one" }] } });
   assert.equal(r.status, 400);
@@ -95,16 +100,19 @@ test("holding with nothing rolled is a 422 and changes nothing", opts, async () 
   assert.equal(g.json.game.currentPlayer, 0);
 });
 
+// EDITED (3 of 3): the loop cap is a named constant and the final assertion
+// explains itself if the game never ends. Same limit (500), same checks.
 test("a finished game refuses further moves", opts, async () => {
   const api = await load();
   const { id, token } = await newGame(api, { maxPoints: 25 });
   const headers = { "x-game-token": token };
+  const MAX_ROLLS = 500;
   let last;
-  for (let i = 0; i < 500; i++) {
+  for (let i = 0; i < MAX_ROLLS; i++) {
     last = await call(api.roll, { method: "POST", query: { id }, headers });
     if (last.json?.game?.status === "finished") break;
   }
-  assert.equal(last.json.game.status, "finished");
+  assert.equal(last.json.game.status, "finished", `game not finished after ${MAX_ROLLS} rolls`);
   assert.ok(last.json.game.winnerIndex === 0 || last.json.game.winnerIndex === 1);
   const again = await call(api.roll, { method: "POST", query: { id }, headers });
   assert.equal(again.status, 409);
