@@ -10,6 +10,8 @@ Built on top of the base game by [Hemephelus](https://github.com/Hemephelus/gree
 | Name | Matric number |
 | ---- | ------------- |
 | Enomfon Okon | 23120112042 |
+| Oluwasegun Da-Silva | 2312011200 |
+| David Akindele | 23120112008 |
 | Oluwasegun Da-Silva | 23120112012 |
 | David Akindele | 2312011200 |
 
