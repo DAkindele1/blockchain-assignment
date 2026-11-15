@@ -1,15 +1,10 @@
-// Local development server for the /api routes (npm run dev:api).
-// On Vercel the files in /api are deployed as serverless functions; this file
-// just lets the exact same handlers run on your machine at http://localhost:3001.
 import http from "node:http";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 
 try {
-  process.loadEnvFile(".env"); // DATABASE_URL etc. (Node 20.12+)
-} catch {
-  /* no .env file: rely on real environment variables */
-}
+  process.loadEnvFile(".env");
+} catch {}
 
 const routes = [
   { re: /^\/api\/health$/, file: "api/health.js" },

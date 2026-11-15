@@ -13,7 +13,7 @@
 7. **Finish a game (set max score to 25 beforehand), open Leaderboard and your player page** (45 s).
 8. **Turn the network off and roll** (15 s) – friendly error, then it recovers.
 
-## The three improvements (one sentence each)
+## The three improvements
 
 1. **Computer opponent** – `botShouldHold` in `api/_lib/game.js`; the server plays the whole turn and returns the steps.
 2. **Leaderboard / stats / history** – SQL aggregates in `api/leaderboard.js` and `api/player.js` over finished games.
