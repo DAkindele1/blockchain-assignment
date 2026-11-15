@@ -1,0 +1,1042 @@
+diff --git a/README.md b/README.md
+index 1073ac1..6ec65cf 100644
+--- a/README.md
++++ b/README.md
+@@ -53,7 +53,58 @@ Every roll, bust and pass is stored, and finished games feed three screens:
+ The numbers are computed with SQL aggregates over `games`, `game_players` and `rolls`
+ (`api/leaderboard.js`, `api/player.js`).
+ 
+-(Improvement 3 is described below as it is completed.)
++## Improvement 3 – Accessibility and experience
++
++The base game already had sound effects and a mute switch. This version adds:
++
++- **Interactive tutorial** – a step-by-step dialog shown the first time a game opens, and reopenable any
++  time from the menu, the setup screen or by pressing `?`.
++- **Full keyboard play** – `Space`/`R` roll, `P`/`H` pass, `M` sound, `?` help. Focus is always visible,
++  and the tutorial traps focus and closes with `Esc`.
++- **Screen-reader support** – every roll, bust, pass and turn change is announced through a live region;
++  tables have captions, `aria-current` marks the active player, controls have proper labels, decorative
++  pig images are hidden from assistive tech, and winner/tutorial popups are real dialogs.
++- **Reduce-motion support** – the dice tumble shortens and confetti is skipped if the device asks for less motion.
++- Checked with the axe-core WCAG 2 A/AA audit (0 violations on home, setup, game and leaderboard).
++
++## User-friendliness
++
++- New players can press **Start Game** straight away (pigs have default names) and the tutorial explains the rest.
++- Responsive layouts for phones and desktops; the status banner stays pinned so feedback is never off-screen.
++- Clear feedback on every action ("Ada rolled a 4. Turn total: 4.") and friendly errors: invalid names or
++  scores, server unreachable (with automatic re-sync), game not found, loading states with *Try again*.
++
++## Rules (as implemented on the server)
++
++Roll the die repeatedly: 2–6 add to your turn total, a **1** loses the turn total and passes the turn.
++**Pass** banks the turn total (you must roll at least once first). First to reach the max score wins
++(25–500, default 100).
++
++## Security / anti-cheat notes
++
++- Dice are rolled on the server with `crypto.randomInt`; the browser never sends a roll value.
++- All input is validated server-side (names, avatars, scores, player count, difficulty, game ids).
++- A per-game secret token authorises rolls/holds; rolls on one game are serialised by a database row lock.
++- SQL uses parameterised queries only.
++- Known limitation: players are identified by name (no passwords), so the leaderboard trusts names.
++
++## Project layout
++
++```
++api/                 Vercel serverless functions (the backend)
++  _lib/game.js       pure game rules + bot strategy (no DB, easy to test)
++  _lib/repo.js       all SQL for games
++  _lib/db.js         Postgres pool + automatic schema creation
++  games/ ...         create / get / roll / hold / bot endpoints
++  leaderboard.js, player.js
++src/                 React frontend
++  api/client.js      fetch wrapper with friendly errors
++  routes/play_friends_live/LivePage.jsx   game controller (talks to the API)
++tests/               unit + API integration tests
++dev-server.js        runs the API locally
++```
++
++See `WALKTHROUGH.md` for a demo script and answers to likely questions.
+ 
+ ## API
+ 
+diff --git a/ToDo.md b/ToDo.md
+index ddf246b..692fdb5 100644
+--- a/ToDo.md
++++ b/ToDo.md
+@@ -5,7 +5,7 @@
+ 1.  work on the floating points screen 
+ 2.  Implement history for the undo snd redo buttons
+ 3.  rethink state management
+-4.  Not started the player with computer version
++4.  ~~Player vs computer version~~ (done: Easy/Medium/Hard)
+ 5.  Not started the remote versions
+ 6.  look into realtime gaming
+ 
+diff --git a/WALKTHROUGH.md b/WALKTHROUGH.md
+new file mode 100644
+index 0000000..636286a
+--- /dev/null
++++ b/WALKTHROUGH.md
+@@ -0,0 +1,49 @@
++# Demo walkthrough (5 minutes) and code Q&A
++
++## Demo script
++
++1. **Open the live URL on a phone-sized window and a desktop one** (30 s) – show it is responsive.
++2. **Home → Play vs Computer → Hard** (30 s) – type a name, press Start. The tutorial opens (first visit).
++3. **Play with the keyboard only** (60 s) – `Space` to roll, `P` to pass. Point at the status banner.
++   Mention a screen reader announces the same text.
++4. **Let the computer play** (30 s) – its rolls are animated; explain the server decided them.
++5. **Show the backend** (60 s) – open `/api/health`, then DevTools → Network: the roll response contains the
++   value; there is no way to send your own. Try a roll without the token (or edit it) → `403`.
++6. **Refresh the page mid-game** (15 s) – the game comes back from Postgres.
++7. **Finish a game (set max score to 25 beforehand), open Leaderboard and your player page** (45 s).
++8. **Turn the network off and roll** (15 s) – friendly error, then it recovers.
++
++## The three improvements (one sentence each)
++
++1. **Computer opponent** – `botShouldHold` in `api/_lib/game.js`; the server plays the whole turn and returns the steps.
++2. **Leaderboard / stats / history** – SQL aggregates in `api/leaderboard.js` and `api/player.js` over finished games.
++3. **Accessibility** – tutorial (`Tutorial.jsx`), keyboard shortcuts (`Game.jsx`), live-region announcements (`StatusBanner.jsx`), reduce-motion.
++
++## How a roll works (follow this when asked "explain your code")
++
++1. Player presses Space or taps the die → `roll()` in `src/routes/play_friends_live/LivePage.jsx`.
++2. It calls `POST /api/games/:id/roll` with the secret `x-game-token` (`src/api/client.js`).
++3. `api/games/[id]/roll.js` opens a transaction, **locks the game row** (`FOR UPDATE`), checks the token,
++   rolls with `crypto.randomInt`, applies the rules with `applyRoll` (`api/_lib/game.js`), saves the new
++   scores and logs the roll in the `rolls` table.
++4. The browser waits for the response *and* the 1.5 s tumble animation, then shows the server's result.
++
++## Database (3 tables, created automatically in `api/_lib/schema.js`)
++
++- `games` – settings, whose turn, status, winner, secret token.
++- `game_players` – name, avatar, bot flag, total and running points per player.
++- `rolls` – every roll / bust / pass in order.
++
++## Likely questions
++
++- **Why can't players cheat?** Dice and scoring are server-side; the browser only says "roll" or "pass".
++  The token stops other people acting in your game; the row lock stops double-clicking from double-rolling.
++- **Why Postgres?** Leaderboard and history are relational queries (joins, GROUP BY, window of last 20 games).
++- **Why does Hold need a roll first?** Otherwise a player could skip turns for free; the server enforces it (HTTP 422).
++- **What are the bot strategies?** Easy: banks randomly between 8–13. Medium: hold at 20. Hard: 20 normally,
++  30 if you are within 25 of winning, 15 if it leads by 25+, never banks within 10 of winning.
++- **How are tables created?** `ensureSchema()` in `api/_lib/db.js` runs `CREATE TABLE IF NOT EXISTS` once per
++  server start, guarded by a Postgres advisory lock.
++- **What would you improve?** Passwords/accounts for the leaderboard, rate limiting, online multiplayer rooms.
++- **How is it tested?** `npm test`: unit tests for rules/validation/bot and integration tests that call the
++  real handlers against Postgres (wrong token, bad ids, concurrent rolls replayed from the log, full games).
+diff --git a/src/components/Dice.jsx b/src/components/Dice.jsx
+index 1b0f2c1..64315d9 100644
+--- a/src/components/Dice.jsx
++++ b/src/components/Dice.jsx
+@@ -19,6 +19,7 @@ export function Dice() {
+   const shown = isRolling ? shuffleFace : Math.max(diceValue - 1, 0);
+ 
+   return (
++    <div className="flex flex-col items-center gap-2">
+     <button
+       className="hover:scale-105 active:scale-100 duration-300 md:w-auto w-[200px] disabled:opacity-60 disabled:hover:scale-100 disabled:cursor-not-allowed"
+       onClick={roll}
+@@ -34,5 +35,9 @@ export function Dice() {
+         />
+       ))}
+     </button>
++    <p className="hidden md:block text-xs text-[#ffffffa0]" aria-hidden="true">
++      Press <kbd className="font-mono">Space</kbd> to roll
++    </p>
++    </div>
+   );
+ }
+diff --git a/src/components/SoundSwitch.jsx b/src/components/SoundSwitch.jsx
+index 215aa93..5949e84 100644
+--- a/src/components/SoundSwitch.jsx
++++ b/src/components/SoundSwitch.jsx
+@@ -10,6 +10,9 @@ function SoundSwitch() {
+       onClick={() => {
+         setHasSound(!hasSound);
+       }}
++      aria-label={hasSound ? "Mute sound" : "Turn sound on"}
++      aria-pressed={!hasSound}
++      title="Sound (M)"
+     >
+       {hasSound ? <AiFillSound size={24} /> : <AiOutlineSound size={24} />}
+     </button>
+diff --git a/src/components/StatusBanner.jsx b/src/components/StatusBanner.jsx
+index a34e364..6e42fae 100644
+--- a/src/components/StatusBanner.jsx
++++ b/src/components/StatusBanner.jsx
+@@ -1,5 +1,6 @@
+ // Shows the latest thing that happened in the game ("Ada rolled a 4",
+-// "Couldn't reach the server"...). Gives players clear feedback on every action.
++// "Couldn't reach the server"...). It is also a polite live region, so screen
++// readers announce every update without the player having to look for it.
+ import { useLiveGameContext } from "src/context/useLiveGameContext";
+ 
+ const STYLES = {
+@@ -11,12 +12,15 @@ const STYLES = {
+ 
+ export default function StatusBanner() {
+   const { message } = useLiveGameContext();
+-  if (!message) return null;
+   return (
+-    <div
+-      className={`${STYLES[message.kind] || STYLES.info} border rounded-lg px-4 py-2 text-center text-sm lg:text-base`}
+-    >
+-      {message.text}
++    <div role="status" aria-live="polite" aria-atomic="true">
++      {message && (
++        <div
++          className={`${STYLES[message.kind] || STYLES.info} border rounded-lg px-4 py-2 text-center text-sm lg:text-base`}
++        >
++          {message.text}
++        </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/components/Tutorial.jsx b/src/components/Tutorial.jsx
+new file mode 100644
+index 0000000..9574652
+--- /dev/null
++++ b/src/components/Tutorial.jsx
+@@ -0,0 +1,130 @@
++import { useEffect, useRef, useState } from "react";
++
++const STEPS = [
++  {
++    title: "Roll the die",
++    body: "Tap the die (or press Space) to roll. Every roll from 2 to 6 is added to your turn total, and you can keep rolling as long as you dare.",
++  },
++  {
++    title: "Watch out for the 1",
++    body: "If you roll a 1, you lose everything you collected this turn and the next player goes. The more you roll, the more you stand to lose!",
++  },
++  {
++    title: "Pass to bank your points",
++    body: "Press PASS (or P) to add your turn total to your score safely. You must roll at least once before you can pass.",
++  },
++  {
++    title: "Race to the target",
++    body: "The first player to reach the max score wins. Playing the computer? It takes its own turn automatically. Pick Easy, Medium or Hard on the setup screen.",
++  },
++  {
++    title: "Keyboard shortcuts",
++    body: null,
++    shortcuts: [
++      ["Space or R", "Roll the die"],
++      ["P or H", "Pass and bank your points"],
++      ["M", "Sound on / off"],
++      ["?", "Open this help"],
++    ],
++  },
++];
++
++// Step-by-step help dialog. Fully keyboard accessible: focus moves into it,
++// Tab stays inside, Escape closes it, and focus returns to where it was.
++export default function Tutorial({ open, onClose }) {
++  const [step, setStep] = useState(0);
++  const dialogRef = useRef(null);
++  const nextRef = useRef(null);
++
++  useEffect(() => {
++    if (!open) return;
++    setStep(0);
++    const previouslyFocused = document.activeElement;
++    nextRef.current?.focus();
++
++    function onKeyDown(e) {
++      if (e.key === "Escape") {
++        e.stopPropagation();
++        onClose();
++        return;
++      }
++      if (e.key !== "Tab") return;
++      const focusable = dialogRef.current?.querySelectorAll("button, [href], input");
++      if (!focusable?.length) return;
++      const first = focusable[0];
++      const last = focusable[focusable.length - 1];
++      if (e.shiftKey && document.activeElement === first) {
++        e.preventDefault();
++        last.focus();
++      } else if (!e.shiftKey && document.activeElement === last) {
++        e.preventDefault();
++        first.focus();
++      }
++    }
++    document.addEventListener("keydown", onKeyDown, true);
++    return () => {
++      document.removeEventListener("keydown", onKeyDown, true);
++      previouslyFocused?.focus?.();
++    };
++  }, [open, onClose]);
++
++  if (!open) return null;
++  const current = STEPS[step];
++  const isLast = step === STEPS.length - 1;
++
++  return (
++    <div className="fixed inset-0 z-50 bg-[#000000b0] flex items-center justify-center p-4">
++      <div
++        ref={dialogRef}
++        role="dialog"
++        aria-modal="true"
++        aria-labelledby="tutorial-title"
++        className="bg-[#1b1b2b] text-white border border-[#ffffff60] rounded-xl p-6 w-full max-w-md space-y-4"
++      >
++        <p className="text-sm text-[#ffffffa0]">
++          Step {step + 1} of {STEPS.length}
++        </p>
++        <h2 id="tutorial-title" className="pri-font text-2xl">
++          {current.title}
++        </h2>
++        {current.body && <p className="text-lg leading-relaxed">{current.body}</p>}
++        {current.shortcuts && (
++          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
++            {current.shortcuts.map(([keys, what]) => (
++              <div key={keys} className="contents">
++                <dt>
++                  <kbd className="bg-[#ffffff25] border border-[#ffffff60] rounded px-2 py-0.5 font-mono text-sm">
++                    {keys}
++                  </kbd>
++                </dt>
++                <dd>{what}</dd>
++              </div>
++            ))}
++          </dl>
++        )}
++        <div className="flex justify-between items-center pt-2">
++          <button onClick={onClose} className="underline text-sm text-[#ffffffc0] hover:text-white">
++            {isLast ? "Close" : "Skip"}
++          </button>
++          <div className="flex gap-2">
++            {step > 0 && (
++              <button
++                onClick={() => setStep(step - 1)}
++                className="rounded px-4 py-2 bg-[#ffffff20] hover:bg-[#ffffff40] font-semibold"
++              >
++                Back
++              </button>
++            )}
++            <button
++              ref={nextRef}
++              onClick={() => (isLast ? onClose() : setStep(step + 1))}
++              className="rounded px-5 py-2 bg-[#D30CBD] hover:bg-[#d30cbc] font-bold"
++            >
++              {isLast ? "Got it!" : "Next"}
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/error-page.jsx b/src/error-page.jsx
+index 0e5a967..8612c88 100644
+--- a/src/error-page.jsx
++++ b/src/error-page.jsx
+@@ -1,16 +1,25 @@
+-import { useRouteError } from "react-router-dom";
++import { Link, useRouteError } from "react-router-dom";
+ 
+ export default function ErrorPage() {
+   const error = useRouteError();
+   console.error(error);
++  const notFound = error?.status === 404;
+ 
+   return (
+-    <div id="error-page">
+-      <h1>Oops!</h1>
+-      <p>Sorry, an unexpected error has occurred.</p>
+-      <p>
+-        <i>{error.statusText || error.message}</i>
++    <div
++      id="error-page"
++      role="alert"
++      className="min-h-screen bg-[#111111] text-white flex flex-col items-center justify-center gap-4 p-6 text-center"
++    >
++      <h1 className="pri-font text-4xl">{notFound ? "Page not found" : "Oops!"}</h1>
++      <p className="max-w-md">
++        {notFound
++          ? "That page doesn't exist. Let's get you back to the game."
++          : "Something went wrong on our side. Going back to the home page usually fixes it."}
+       </p>
++      <Link to="/" className="rounded px-8 py-3 bg-[#D30CBD] font-bold hover:scale-95 duration-300">
++        Back to home
++      </Link>
+     </div>
+   );
+ }
+diff --git a/src/index.css b/src/index.css
+index 8ad280d..e49f227 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -25,3 +25,21 @@
+ ::-webkit-scrollbar-thumb {
+   /* Customize the scrollbar thumb */
+ }
++
++/* Accessibility: always show where keyboard focus is */
++:focus-visible {
++  outline: 3px solid #ffd700;
++  outline-offset: 2px;
++}
++
++/* Accessibility: respect "reduce motion" system settings */
++@media (prefers-reduced-motion: reduce) {
++  *,
++  *::before,
++  *::after {
++    animation-duration: 0.01ms !important;
++    animation-iteration-count: 1 !important;
++    transition-duration: 0.01ms !important;
++    scroll-behavior: auto !important;
++  }
++}
+diff --git a/src/routes/HowToPlay.jsx b/src/routes/HowToPlay.jsx
+index 3b81b42..bf7adea 100644
+--- a/src/routes/HowToPlay.jsx
++++ b/src/routes/HowToPlay.jsx
+@@ -11,7 +11,8 @@ export default function HowToPlay() {
+       <nav className="fixed top-0 w-full flex justify-between p-[5%]">
+         <BackButton />
+         <Link
+-          to={`/setup`}
++          to={`/`}
++          aria-label="Home"
+           className=" bg-[#D30CBD80] hover:bg-[#D30CBD] duration-300 text-white w-[48px] h-[48px] border rounded-full flex items-center justify-around"
+         >
+           <AiFillHome size={24} />
+@@ -26,10 +27,10 @@ export default function HowToPlay() {
+           <h1 className="pri-font text-2xl lg:text-4xl">GAME SETUP</h1>
+           <section className=" backdrop:blur bg-[#ffffff10] px-8 lg:px-12 py-6 border text-base lg:text-xl rounded-lg">
+             <ol className=" list-decimal">
+-              <li>Enter the max total point you want to reach. "First person to get to 100"</li>
+-              <li>Enter the number of players playing</li>
+-              <li>Enter the player names</li>
+-              <li>Next click on the "Play" button</li>
++              <li>Choose <b>With friends</b> or <b>Vs computer</b> (Easy, Medium or Hard)</li>
++              <li>Enter the max score you want to reach (25 to 500)</li>
++              <li>Add the players and enter their names (2 to 8 players with friends)</li>
++              <li>Click "Start Game"</li>
+             </ol>
+           </section>
+         </section>
+@@ -65,17 +66,29 @@ export default function HowToPlay() {
+             4.
+           </h4>
+           <p >
+-          The first player to score <b>100</b> or more points wins
++          The first player to reach the <b>max score</b> wins. You must roll at least once before you can pass.
+           </p>
+           </section>
+         </section>
++        <section className="text-white space-y-4">
++          <h1 className="pri-font text-2xl lg:text-4xl">KEYBOARD SHORTCUTS</h1>
++          <section className=" backdrop:blur bg-[#ffffff10] px-8 lg:px-12 py-6 border text-base lg:text-xl rounded-lg">
++            <ul className="space-y-2">
++              <li><kbd className="font-mono bg-[#ffffff25] rounded px-2">Space</kbd> or <kbd className="font-mono bg-[#ffffff25] rounded px-2">R</kbd> roll the die</li>
++              <li><kbd className="font-mono bg-[#ffffff25] rounded px-2">P</kbd> or <kbd className="font-mono bg-[#ffffff25] rounded px-2">H</kbd> pass and bank your points</li>
++              <li><kbd className="font-mono bg-[#ffffff25] rounded px-2">M</kbd> sound on / off</li>
++              <li><kbd className="font-mono bg-[#ffffff25] rounded px-2">?</kbd> open the tutorial</li>
++            </ul>
++            <p className="mt-4 text-base">Screen readers announce every roll, pass and turn change.</p>
++          </section>
++        </section>
+         <section className="text-white space-y-4">
+           <h1 className="pri-font text-2xl lg:text-4xl">About the Devs</h1>
+           <section className=" backdrop:blur bg-[#ffffff10] px-8 lg:px-12 py-6 border text-base lg:text-xl rounded-lg">
+             <ul className=" list-disc space-y-4">
+-              <li>My name is Nwachuwku I am a front-end dev.</li>
++              <li>Original game by Nwachukwu (front-end dev).</li>
+               <li>This is my <a href="https://sites.google.com/view/nwachukwuujubuonu/home" target="blanks" className=" underline text-[#D30CBD] font-bold">portfolio site</a> if you you like to see some of my other works.</li>
+-              <li>This project was built with React and Vite</li>
++              <li>Built with React and Vite. This version adds a Postgres-backed API, computer opponents, a leaderboard and accessibility features for CSC 419 at Pan-Atlantic University.</li>
+               <li>I didn't work alone. This project was designed by <b>Oluwatomisin Rhema Eghosa Odukoya</b> and <b>Alozie Blessed  Chuebuka</b>. </li>
+             </ul>
+           </section>
+diff --git a/src/routes/play_friends_live/LivePage.jsx b/src/routes/play_friends_live/LivePage.jsx
+index dc517fb..8be6c42 100644
+--- a/src/routes/play_friends_live/LivePage.jsx
++++ b/src/routes/play_friends_live/LivePage.jsx
+@@ -1,10 +1,12 @@
+-import { useEffect, useMemo, useRef, useState } from "react";
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { Outlet } from "react-router-dom";
+ import { useGreedyPigContext } from "src/context/useGreedyPigContext";
+ import { LiveGameContext } from "src/context/useLiveGameContext";
+ import { getInitialPlayerData } from "src/utils/live_game/getInitialData";
+ import { toPlayerData, readSession, writeSession } from "src/utils/live_game/gameMapping";
+ import { api, ApiError } from "src/api/client";
++import Tutorial from "src/components/Tutorial";
++import { prefersReducedMotion, markTutorialSeen } from "src/utils/accessibility";
+ import useAudio from "src/hooks/useAudio";
+ import diceRollSound from "src/sound_effect/dice_roll.mp3";
+ import addPlayerSound from "src/sound_effect/add_player.mp3";
+@@ -51,6 +53,7 @@ function LivePage() {
+   const [numberRolled, setNumberRolled] = useState(0);
+   const [gameHistory, setGameHistory] = useState([]);
+   const [isRunning, setIsRunning] = useState("?");
++  const [tutorialOpen, setTutorialOpen] = useState(false);
+ 
+   const busyRef = useRef(false);
+   const latest = useRef({});
+@@ -70,6 +73,18 @@ function LivePage() {
+     };
+   }, []);
+ 
++  function openTutorial() {
++    setTutorialOpen(true);
++  }
++  const closeTutorial = useCallback(() => {
++    markTutorialSeen();
++    setTutorialOpen(false);
++  }, []);
++
++  // Tumble time: very short for people who asked their device to reduce motion.
++  const rollMs = () => (prefersReducedMotion() ? 300 : ROLL_MS);
++  const botRollMs = () => (prefersReducedMotion() ? 300 : BOT_ROLL_MS);
++
+   function say(text, kind = "info") {
+     setMessage({ text, kind });
+   }
+@@ -141,7 +156,7 @@ function LivePage() {
+     let next = null;
+     try {
+       // Wait for BOTH the server's answer and the tumble animation.
+-      const [res] = await Promise.all([api.roll(s.id, s.token), sleep(ROLL_MS)]);
++      const [res] = await Promise.all([api.roll(s.id, s.token), sleep(rollMs())]);
+       if (!isMounted.current) return;
+       applyGame(res.game);
+       const [text, kind] = describe(res.event, res.game);
+@@ -159,7 +174,7 @@ function LivePage() {
+         setBusy(false);
+       }
+     }
+-    if (isMounted.current && isComputersTurn(next)) await runBotTurn();
++    if (isMounted.current && isComputersTurn(next)) await runBotTurn({ delay: 1400 });
+   }
+ 
+   async function hold() {
+@@ -187,7 +202,7 @@ function LivePage() {
+       busyRef.current = false;
+       if (isMounted.current) setBusy(false);
+     }
+-    if (isMounted.current && isComputersTurn(next)) await runBotTurn();
++    if (isMounted.current && isComputersTurn(next)) await runBotTurn({ delay: 1400 });
+   }
+ 
+   function isComputersTurn(game) {
+@@ -196,13 +211,15 @@ function LivePage() {
+ 
+   // The SERVER plays the computer's whole turn and returns every step; we
+   // just replay those steps with the dice animation so it feels like a player.
+-  async function runBotTurn() {
++  async function runBotTurn({ delay = 0 } = {}) {
+     const { session: s } = latest.current;
+     if (busyRef.current || !s) return;
+     busyRef.current = true;
+     setBusy(true);
+-    say("The computer is thinking…");
+     try {
++      if (delay) await sleep(delay); // let the player read what just happened
++      if (!isMounted.current) return;
++      say("The computer is thinking…");
+       const [res] = await Promise.all([api.botTurn(s.id, s.token), sleep(700)]);
+       const botIndex = res.steps[0].player;
+       const name = res.game.players[botIndex].name;
+@@ -224,7 +241,7 @@ function LivePage() {
+         setIsRolling(true);
+         setChangeBackground(true);
+         playSound(rollAudio);
+-        await sleep(BOT_ROLL_MS);
++        await sleep(botRollMs());
+         rollAudio?.pause();
+         if (!isMounted.current) return;
+         setIsRolling(false);
+@@ -283,9 +300,10 @@ function LivePage() {
+     const next = { id: res.game.id, token: res.token };
+     writeSession(next);
+     setSession(next);
+-    setMessage(null);
+     applyGame(res.game);
+     setIsContinue(true);
++    const first = res.game.players[0].name;
++    say(`Game started. ${first} goes first. Press Space or tap the die to roll.`);
+     return res.game;
+   }
+ 
+@@ -311,7 +329,7 @@ function LivePage() {
+ 
+   return (
+     <>
+-      <main className="bg-[#111111] min-h-screen min-w-full relative z-10 sec-font ">
++      <div className="bg-[#111111] min-h-screen min-w-full relative z-10 sec-font ">
+         <div
+           className={`${
+             changeBackground
+@@ -355,6 +373,9 @@ function LivePage() {
+             startGame,
+             loadSavedGame,
+             resumeBotIfNeeded,
++            tutorialOpen,
++            openTutorial,
++            closeTutorial,
+             // ui
+             isRolling,
+             busy,
+@@ -373,8 +394,9 @@ function LivePage() {
+           }}
+         >
+           <Outlet />
++          <Tutorial open={tutorialOpen} onClose={closeTutorial} />
+         </LiveGameContext.Provider>
+-      </main>
++      </div>
+     </>
+   );
+ }
+diff --git a/src/routes/play_friends_live/game/Game.jsx b/src/routes/play_friends_live/game/Game.jsx
+index ff6896c..b19dfcf 100644
+--- a/src/routes/play_friends_live/game/Game.jsx
++++ b/src/routes/play_friends_live/game/Game.jsx
+@@ -1,8 +1,10 @@
+-import { useEffect, useState } from "react";
++import { useEffect, useRef, useState } from "react";
+ import { Link, useNavigate } from "react-router-dom";
+ import Navbar from "src/components/Navbar";
+ import StatusBanner from "src/components/StatusBanner";
+ import { useLiveGameContext } from "src/context/useLiveGameContext";
++import { useGreedyPigContext } from "src/context/useGreedyPigContext";
++import { hasSeenTutorial } from "src/utils/accessibility";
+ import PlayerTable from "./components/PlayerTable";
+ import StatsSection from "./components/StatsSection";
+ import GameOver from "./GameOver";
+@@ -20,7 +22,12 @@ export default function LiveGame() {
+     loadSavedGame,
+     resumeBotIfNeeded,
+     setMessage,
++    roll,
++    hold,
++    tutorialOpen,
++    openTutorial,
+   } = useLiveGameContext();
++  const { hasSound, setHasSound } = useGreedyPigContext();
+   const navigate = useNavigate();
+   const [loadError, setLoadError] = useState("");
+   const [attempt, setAttempt] = useState(0);
+@@ -55,7 +62,41 @@ export default function LiveGame() {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [attempt]);
+ 
++  // Keyboard shortcuts. The handler always sees the latest actions via a ref.
++  const keys = useRef({});
++  keys.current = { roll, hold, tutorialOpen, openTutorial, hasSound, setHasSound };
++  useEffect(() => {
++    function onKeyDown(e) {
++      const k = keys.current;
++      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || k.tutorialOpen) return;
++      const target = e.target;
++      if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable) return;
++      const key = e.key.toLowerCase();
++      // Space on a focused button/link already activates it natively.
++      if (key === " " && target.closest?.("button, a, [role=radio]")) return;
++      if (key === " " || key === "r") {
++        e.preventDefault();
++        k.roll();
++      } else if (key === "p" || key === "h") {
++        e.preventDefault();
++        k.hold();
++      } else if (key === "m") {
++        k.setHasSound(!k.hasSound);
++      } else if (key === "?" || key === "/") {
++        e.preventDefault();
++        k.openTutorial();
++      }
++    }
++    window.addEventListener("keydown", onKeyDown);
++    return () => window.removeEventListener("keydown", onKeyDown);
++  }, []);
++
+   const isLoaded = playerData.length > 0;
++  useEffect(() => {
++    // First time anyone opens a game, show the tutorial.
++    if (isLoaded && !hasSeenTutorial()) openTutorial();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [isLoaded]);
+   useEffect(() => {
+     if (isLoaded) resumeBotIfNeeded();
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+@@ -85,23 +126,34 @@ export default function LiveGame() {
+   }
+ 
+   return (
+-    <div className="md:grid md:grid-cols-[minmax(auto,_200px)_1fr_minmax(auto,_200px)] lg:grid-cols-[minmax(auto,_250px)_1fr_minmax(auto,_250px)] xl:grid-cols-[auto_1fr_minmax(auto,_300px)] relative">
+-      <DiceSection />
+-      <div className=" space-y-2 p-2">
++    <>
++      {/* Phones: header + status stay pinned to the top of the whole page */}
++      <div className="md:hidden sticky top-0 z-20 space-y-2 bg-[#111111e6] backdrop-blur-sm pb-2">
+         <Navbar />
+-        <StatusBanner />
+-        <PlayerTable playerData={playerData} currentPlayer={currentPlayer} />
++        <div className="px-2">
++          <StatusBanner />
++        </div>
+       </div>
+-      <CurrentPlayerMobile playerData={playerData} currentPlayer={currentPlayer} />
+-      <DiceSectionMobile />
++      <div className="md:grid md:grid-cols-[minmax(auto,_200px)_1fr_minmax(auto,_200px)] lg:grid-cols-[minmax(auto,_250px)_1fr_minmax(auto,_250px)] xl:grid-cols-[auto_1fr_minmax(auto,_300px)] relative">
++        <DiceSection />
++        <div className=" space-y-2 p-2">
++          <div className="hidden md:block sticky top-0 z-20 space-y-2">
++            <Navbar />
++            <StatusBanner />
++          </div>
++          <PlayerTable playerData={playerData} currentPlayer={currentPlayer} />
++        </div>
++        <CurrentPlayerMobile playerData={playerData} currentPlayer={currentPlayer} />
++        <DiceSectionMobile />
+ 
+-      <StatsSection playerData={playerData} currentPlayer={currentPlayer} />
+-      <StatsSectionMobile playerData={playerData} currentPlayer={currentPlayer} />
+-      {isGameOver ? (
+-        <GameOver playerData={playerData} currentPlayer={currentPlayer} setIsContinue={setIsContinue} />
+-      ) : (
+-        <></>
+-      )}
+-    </div>
++        <StatsSection playerData={playerData} currentPlayer={currentPlayer} />
++        <StatsSectionMobile playerData={playerData} currentPlayer={currentPlayer} />
++        {isGameOver ? (
++          <GameOver playerData={playerData} currentPlayer={currentPlayer} setIsContinue={setIsContinue} />
++        ) : (
++          <></>
++        )}
++      </div>
++    </>
+   );
+ }
+diff --git a/src/routes/play_friends_live/game/GameOver.jsx b/src/routes/play_friends_live/game/GameOver.jsx
+index 330b5fb..bba3363 100644
+--- a/src/routes/play_friends_live/game/GameOver.jsx
++++ b/src/routes/play_friends_live/game/GameOver.jsx
+@@ -1,6 +1,7 @@
+ import React, { useRef, useState, useEffect } from "react";
+ import Confetti from "react-confetti";
+ import { Link } from "react-router-dom";
++import { prefersReducedMotion } from "src/utils/accessibility";
+ 
+ function GameOver({ playerData, currentPlayer, setIsContinue }) {
+   const [leaderBoard, setLeaderBoard] = useState(playerData);
+@@ -20,15 +21,16 @@ function GameOver({ playerData, currentPlayer, setIsContinue }) {
+     setLeaderBoard(newLeaderBoard);
+   }, [playerData, currentPlayer]);
+   return (
+-    <div className=" min-h-screen w-screen absolute bg-[#000000c0] flex justify-center items-center  text-white top-0">
+-      <Confetti width={windowWidth.current} height={windowHeight.current} />
++    <div role="dialog" aria-modal="true" aria-labelledby="winner-title" className=" min-h-screen w-screen absolute bg-[#000000c0] flex justify-center items-center  text-white top-0">
++      {!prefersReducedMotion() && <Confetti width={windowWidth.current} height={windowHeight.current} />}
+       <section className="grid place-content-center gap-4 w-[400px]">
+         <figure className="flex justify-center w-full">
+           <img src={leaderBoard[0].avatar} alt="" width={300}/>
+         </figure>
+-        <p className="text-center text-5xl pri-font capitalize">{leaderBoard[0].name === ''?leaderBoard[0].tag:leaderBoard[0].name} wins</p>
++        <h2 id="winner-title" className="text-center text-5xl pri-font capitalize">{leaderBoard[0].name === ''?leaderBoard[0].tag:leaderBoard[0].name} wins</h2>
+ 
+         <Link
++          autoFocus
+           to={`/live-game/setup`}
+           className="text-center sec-font text-xl rounded px-8 py-4 bg-[#d30cbcc0] font-bold duration-500 skew-x-6 hover:skew-x-0 hover:scale-95 hover:bg-[#d30cbc]"
+         >
+diff --git a/src/routes/play_friends_live/game/components/CurrentPlayerMobile.jsx b/src/routes/play_friends_live/game/components/CurrentPlayerMobile.jsx
+index 74ce175..997e1af 100644
+--- a/src/routes/play_friends_live/game/components/CurrentPlayerMobile.jsx
++++ b/src/routes/play_friends_live/game/components/CurrentPlayerMobile.jsx
+@@ -10,7 +10,7 @@ function CurrentPlayerMobile({ playerData, currentPlayer }) {
+           >
+             <td className="w-[50px]">
+               <figure className={` h-[40px]  p-2 `}>
+-                <img src={playerData[currentPlayer].avatar} />
++                <img src={playerData[currentPlayer].avatar} alt="" />
+               </figure>
+             </td>
+             <td className=" ">
+diff --git a/src/routes/play_friends_live/game/components/DiceSection.jsx b/src/routes/play_friends_live/game/components/DiceSection.jsx
+index 7f851c0..99b7e1e 100644
+--- a/src/routes/play_friends_live/game/components/DiceSection.jsx
++++ b/src/routes/play_friends_live/game/components/DiceSection.jsx
+@@ -18,7 +18,7 @@ function DiceSection() {
+         aria-disabled={busy || isGameOver || cantPass}
+         aria-label="Pass the turn and bank your points"
+       >
+-        PASS
++        PASS <span className="hidden lg:inline text-xs font-normal" aria-hidden="true">(P)</span>
+       </button>
+       <div className="text-white grid place-content-center gap-2 bg-[#ffffff10] w-full p-4 rounded-lg border border-[#ffffff40]">
+         <p className="text-center text-sm lg:text-lg">{playerData.length} players</p>
+diff --git a/src/routes/play_friends_live/game/components/Menu.jsx b/src/routes/play_friends_live/game/components/Menu.jsx
+index a004017..e0505f8 100644
+--- a/src/routes/play_friends_live/game/components/Menu.jsx
++++ b/src/routes/play_friends_live/game/components/Menu.jsx
+@@ -3,11 +3,14 @@ import { HiOutlineMenu } from "react-icons/hi";
+ import { GoTools } from "react-icons/go";
+ import { Link } from "react-router-dom";
+ import SoundSwitch from "src/components/SoundSwitch";
++import { useLiveGameContext } from "src/context/useLiveGameContext";
++import { AiOutlineQuestionCircle } from "react-icons/ai";
+ 
+ function Menu() {
++  const { openTutorial } = useLiveGameContext();
+   return (
+     <div className="group flex flex-col items-center gap-2 hover:cursor-pointer text-sm relative">
+-      <div className="flex  gap-2 group-hover:scale-100 scale-0 delay-300 duration-500 bg-[#D30CBD] bottom-0 md:bg-[#D30CBD40] p-2 rounded-lg absolute w-[150px] m-auto">
++      <div className="flex  gap-2 group-hover:scale-100 group-focus-within:scale-100 scale-0 delay-300 duration-500 bg-[#D30CBD] bottom-0 md:bg-[#D30CBD40] p-2 rounded-lg absolute w-[230px] m-auto">
+         {/* <div className="grid grid-cols-2 gap-2">
+           <button
+             className=" bg-[#ffffff20] hover:bg-[#ffffff40] text-white rounded-lg flex flex-col gap-2 p-2  justify-center items-center hover:scale-105 active:scale-100 duration-300"
+@@ -24,7 +27,7 @@ function Menu() {
+             <BiRedo size={24} /> Redo
+           </button>
+         </div> */}
+-        <div  className="grid grid-cols-2 gap-2 w-full">
++        <div  className="grid grid-cols-3 gap-2 w-full">
+           <Link
+             to={`/live-game/setup`}
+             className=" bg-[#ffffff40] hover:bg-[#ffffff80] text-white rounded-lg flex flex-col gap-2 p-2 justify-end items-center hover:scale-105 active:scale-100 duration-300"
+@@ -36,13 +39,20 @@ function Menu() {
+           </Link>
+           <div
+             className=" bg-[#ffffff40] hover:bg-[#ffffff80] text-white rounded-lg flex flex-col gap-2 p-2 justify-end items-center hover:scale-105 active:scale-100 duration-300"
+-            title="Setup"
+           >
+            <SoundSwitch/> Sound
+           </div>
++          <button
++            onClick={openTutorial}
++            className=" bg-[#ffffff40] hover:bg-[#ffffff80] text-white rounded-lg flex flex-col gap-2 p-2 justify-end items-center hover:scale-105 active:scale-100 duration-300"
++            title="Help (?)"
++          >
++            <AiOutlineQuestionCircle size={24} />
++            Help
++          </button>
+         </div>
+       </div>
+-      <button className="w-[48px] h-[48px] bg-[#D30CBD80] text-white rounded-full flex justify-center items-center">
++      <button aria-label="Menu" className="w-[48px] h-[48px] bg-[#D30CBD80] text-white rounded-full flex justify-center items-center">
+         <HiOutlineMenu size={24} />
+       </button>
+     </div>
+diff --git a/src/routes/play_friends_live/game/components/PlayerTable.jsx b/src/routes/play_friends_live/game/components/PlayerTable.jsx
+index 19928fb..1d342c7 100644
+--- a/src/routes/play_friends_live/game/components/PlayerTable.jsx
++++ b/src/routes/play_friends_live/game/components/PlayerTable.jsx
+@@ -9,12 +9,13 @@ function PlayerTable({playerData, currentPlayer}) {
+ 
+   return (
+     <table className="hidden md:table w-full">
++          <caption className="sr-only">Players, scores and whose turn it is</caption>
+           <thead>
+             <tr className=" w-full h-[50px] bg-[#ffffff20] text-sm lg:text-base items-center  p-2 rounded-lg border border-[#FFFFFF40] hover:border-[#ffffff80] duration-300">
+-              <th className=" text-center text-white">Icons</th>
+-              <th className=" text-center text-white">Name</th>
+-              <th className=" text-center text-white">Total Points</th>
+-              <th className=" text-center text-white">Running Points</th>
++              <th scope="col" className=" text-center text-white">Icons</th>
++              <th scope="col" className=" text-center text-white">Name</th>
++              <th scope="col" className=" text-center text-white">Total Points</th>
++              <th scope="col" className=" text-center text-white">Running Points</th>
+             </tr>
+           </thead>
+        
+@@ -23,6 +24,7 @@ function PlayerTable({playerData, currentPlayer}) {
+               <tr
+                 key={index}
+                 id={`player-row-${index}`}
++                aria-current={index === currentPlayer % playerData.length ? "true" : undefined}
+                 className={`${
+                   index === currentPlayer % playerData.length
+                     ? "bg-[#ffffff40]"
+@@ -31,7 +33,7 @@ function PlayerTable({playerData, currentPlayer}) {
+               >
+                 <td className="h-[70px] p-2 grid place-content-center">
+                   <figure className="w-[50px] bg-[#ffffff20] p-2 border border-[#FFFF8F40] rounded">
+-                    <img src={player.avatar} alt={player.avatar} />
++                    <img src={player.avatar} alt="" />
+                   </figure>
+                 </td>
+                 <td className="">
+diff --git a/src/routes/play_friends_live/game/components/StatsSection.jsx b/src/routes/play_friends_live/game/components/StatsSection.jsx
+index b579f3d..34f030a 100644
+--- a/src/routes/play_friends_live/game/components/StatsSection.jsx
++++ b/src/routes/play_friends_live/game/components/StatsSection.jsx
+@@ -15,7 +15,7 @@ function StatsSection({ playerData, currentPlayer }) {
+         <figure
+           className={` w-[150px] h-[150px] flex justify-center items-center bg-[#ffffff20] p-2 rounded-lg border border-[#FFFFFF40] hover:border-[#ffffff80] duration-300`}
+         >
+-          <img src={playerData[currentPlayer].avatar} />
++          <img src={playerData[currentPlayer].avatar} alt="" />
+         </figure>
+         {playerData[currentPlayer].name === ''?playerData[currentPlayer].tag:playerData[currentPlayer].name}'s Turn
+   </div>      
+@@ -32,7 +32,7 @@ function StatsSection({ playerData, currentPlayer }) {
+                   index === 0
+                     ? `bg-[#FFD70010] text-[#FFEA70] border-[#FFD700c0] hover:border-[#FFD700]`
+                     : index === leaderBoard.length - 1
+-                    ? `bg-[#E71D3610] text-[#F17E8C] border-[#E71D36c0] hover:border-[#E71D36]`
++                    ? `bg-[#E71D3610] text-[#FFE4E8] border-[#E71D36c0] hover:border-[#E71D36]`
+                     : `bg-[#ffffff10] text-[#ffffff] border-[#ffffffc0] hover:border-[#ffffff]`
+                 } w-full h-[50px] rounded-lg border  duration-300 scroll-mt-[300px] text-base lg:text-lg`}
+               >
+@@ -40,7 +40,7 @@ function StatsSection({ playerData, currentPlayer }) {
+                 <td className=" text-center p-1">{index + 1}</td>
+                 <td className="w-[50px]">
+                   <figure className={` h-[40px]  p-2 `}>
+-                    <img src={player.avatar} />
++                    <img src={player.avatar} alt="" />
+                   </figure>
+                 </td>
+                 <td className=" "> {player.name === ''?player.tag:player.name}</td>
+diff --git a/src/routes/play_friends_live/game/components/StatsSectionMobile.jsx b/src/routes/play_friends_live/game/components/StatsSectionMobile.jsx
+index ad97a10..40f1580 100644
+--- a/src/routes/play_friends_live/game/components/StatsSectionMobile.jsx
++++ b/src/routes/play_friends_live/game/components/StatsSectionMobile.jsx
+@@ -24,7 +24,7 @@ function StatsSectionMobile({ playerData, currentPlayer }) {
+                   index === 0
+                     ? `bg-[#FFD70010] text-[#FFEA70] border-[#FFD700c0] hover:border-[#FFD700]`
+                     : index === leaderBoard.length - 1
+-                    ? `bg-[#E71D3610] text-[#F17E8C] border-[#E71D36c0] hover:border-[#E71D36]`
++                    ? `bg-[#E71D3610] text-[#FFE4E8] border-[#E71D36c0] hover:border-[#E71D36]`
+                     : `bg-[#ffffff10] text-[#ffffff] border-[#ffffffc0] hover:border-[#ffffff]`
+                 } w-full h-[50px] rounded-lg border  duration-300 scroll-mt-[300px] text-base lg:text-lg`}
+               >
+@@ -32,7 +32,7 @@ function StatsSectionMobile({ playerData, currentPlayer }) {
+                 <td className=" text-center p-1">{index + 1}</td>
+                 <td className="w-[50px]">
+                   <figure className={` h-[40px]  p-2 `}>
+-                    <img src={player.avatar} />
++                    <img src={player.avatar} alt="" />
+                   </figure>
+                 </td>
+                 <td className=" "> {player.name === ''?player.tag:player.name}</td>
+diff --git a/src/routes/play_friends_live/setup/Setup.jsx b/src/routes/play_friends_live/setup/Setup.jsx
+index 700b9c8..e9d11a9 100644
+--- a/src/routes/play_friends_live/setup/Setup.jsx
++++ b/src/routes/play_friends_live/setup/Setup.jsx
+@@ -49,6 +49,7 @@ function LiveGameSetup() {
+     isContinue,
+     difficulty,
+     setDifficulty,
++    openTutorial,
+   } = useLiveGameContext();
+   const navigate = useNavigate();
+   const [params, setParams] = useSearchParams();
+@@ -93,7 +94,7 @@ function LiveGameSetup() {
+ 
+   return (
+     <>
+-      <main className="">
++      <div>
+         <Navbar />
+         <div className="flex flex-col items-center gap-8 text-white px-[5%] md:px-[10%] py-4 ">
+           <section className="flex flex-col items-center gap-4">
+@@ -174,6 +175,12 @@ function LiveGameSetup() {
+               </button>
+             )}
+             <SoundSwitch />
++            <button
++              onClick={openTutorial}
++              className="text-xs underline text-[#ffffffc0] hover:text-white ml-4"
++            >
++              How do I play?
++            </button>
+           </div>
+           {error && (
+             <p
+@@ -212,7 +219,7 @@ function LiveGameSetup() {
+             )}
+           </section>
+         </div>
+-      </main>
++      </div>
+     </>
+   );
+ }
+diff --git a/src/routes/play_friends_live/setup/components/ImageSlider.jsx b/src/routes/play_friends_live/setup/components/ImageSlider.jsx
+index c8ba8ae..6962322 100644
+--- a/src/routes/play_friends_live/setup/components/ImageSlider.jsx
++++ b/src/routes/play_friends_live/setup/components/ImageSlider.jsx
+@@ -54,7 +54,7 @@ export default function ImageSlider({ player, index }) {
+             } w-[120px] duration-500 h-[160px] flex justify-center items-center`}
+           >
+            
+-            <img src={pig} />
++            <img src={pig} alt="" />
+           </div>
+         );
+       })}
+@@ -72,6 +72,7 @@ function BtnSlider({ direction, moveSlide }) {
+     <button
+       className="w-[50%] p-2  flex justify-center bg-[#ffffff20] hover:bg-[#ffffff40] rounded border border-[#FFFFFF40] hover:border-[#ffffff80] active:scale-90 duration-[100ms] "
+       onClick={() => {audio?.play(),moveSlide()}}
++      aria-label={direction === "next" ? "Next pig" : "Previous pig"}
+ 
+     >
+       {direction === "next" ? (
+diff --git a/src/routes/play_friends_live/setup/components/NameInput.jsx b/src/routes/play_friends_live/setup/components/NameInput.jsx
+index 643a1e5..5940d61 100644
+--- a/src/routes/play_friends_live/setup/components/NameInput.jsx
++++ b/src/routes/play_friends_live/setup/components/NameInput.jsx
+@@ -39,17 +39,20 @@ export default function NameInput({ player,index }) {
+         value={player.name}
+         onChange={handleChange}
+         placeholder="Enter Name"
++        aria-label={`Player ${index + 1} name`}
++        maxLength={24}
+         className="text-lg font-medium text-center bg-transparent w-full p-0.5  border-b border-b-[#FFFFFF40]  "
+       />
+       <div className="group relative">
+         <button
++          aria-label={`Options for player ${index + 1}`}
+           className={`px-1 h-full flex justify-center items-center hover:bg-[#ffffff20] rounded border border-[#FFFFFF40] hover:border-[#ffffff80] duration-300`}
+         >
+           <IoMdMore size={24} />
+         </button>
+ 
+         <button
+-          className={`scale-0 group-hover:scale-100 delay-500 duration-300 text-red-500 bg-slate-50 mt-2 p-1 rounded font-medium absolute max-w-[150px] -left-10`}
++          className={`scale-0 group-hover:scale-100 group-focus-within:scale-100 delay-500 duration-300 text-red-500 bg-slate-50 mt-2 p-1 rounded font-medium absolute max-w-[150px] -left-10`}
+           onClick={removePlayer}
+           disabled={isMin}
+         >
+diff --git a/src/utils/accessibility.js b/src/utils/accessibility.js
+new file mode 100644
+index 0000000..21af9a0
+--- /dev/null
++++ b/src/utils/accessibility.js
+@@ -0,0 +1,21 @@
++export function prefersReducedMotion() {
++  return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
++}
++
++const TUTORIAL_KEY = "greedyPig.tutorialSeen";
++
++export function hasSeenTutorial() {
++  try {
++    return localStorage.getItem(TUTORIAL_KEY) === "1";
++  } catch {
++    return true; // storage blocked: don't nag every time
++  }
++}
++
++export function markTutorialSeen() {
++  try {
++    localStorage.setItem(TUTORIAL_KEY, "1");
++  } catch {
++    /* ignore */
++  }
++}

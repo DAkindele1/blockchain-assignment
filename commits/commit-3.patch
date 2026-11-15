@@ -1,0 +1,560 @@
+diff --git a/README.md b/README.md
+index fadde99..1073ac1 100644
+--- a/README.md
++++ b/README.md
+@@ -40,7 +40,20 @@ them with the dice animation.
+ | Medium | The classic "hold at 20" strategy |
+ | Hard | Banks at 20, but takes more risk (30) when you are within 25 points of winning, plays safe (15) when it leads by 25+, and always keeps rolling when it is 10 or fewer points from winning |
+ 
+-(Improvements 2 and 3 are described below as they are completed.)
++## Improvement 2 – Competition: leaderboard, stats and match history
++
++Every roll, bust and pass is stored, and finished games feed three screens:
++
++- **`/leaderboard`** – top 20 players by wins (win rate and games played break ties), plus how often
++  each beat the computer. A search box jumps to any player's page.
++- **`/player/:name`** – games played, wins, losses, win rate, wins vs computer, current win streak
++  and the last 20 matches with opponents and scores.
++- Only **finished** games count and the computer is never ranked. Names are matched case-insensitively.
++
++The numbers are computed with SQL aggregates over `games`, `game_players` and `rolls`
++(`api/leaderboard.js`, `api/player.js`).
++
++(Improvement 3 is described below as it is completed.)
+ 
+ ## API
+ 
+@@ -52,6 +65,8 @@ them with the dice animation.
+ | POST | `/api/games/:id/roll` | Server rolls the die for the current player |
+ | POST | `/api/games/:id/hold` | Bank the running points and pass the turn |
+ | POST | `/api/games/:id/bot` | Server plays the computer's whole turn and returns every step |
++| GET | `/api/leaderboard` | Top 20 players by wins |
++| GET | `/api/player?name=` | One player's stats and last 20 games |
+ 
+ Errors always look like `{ "error": { "code": "...", "message": "..." } }`.
+ 
+diff --git a/api/leaderboard.js b/api/leaderboard.js
+new file mode 100644
+index 0000000..deab599
+--- /dev/null
++++ b/api/leaderboard.js
+@@ -0,0 +1,31 @@
++import { route } from "./_lib/http.js";
++import { query } from "./_lib/db.js";
++
++// GET /api/leaderboard - top 20 human players by wins, from finished games.
++export default route({
++  async GET() {
++    const { rows } = await query(
++      `SELECT name, games, wins, bot_wins FROM (
++         SELECT (array_agg(gp.name ORDER BY g.finished_at DESC))[1] AS name,
++                count(*)::int AS games,
++                count(*) FILTER (WHERE g.winner_index = gp.idx)::int AS wins,
++                count(*) FILTER (WHERE g.winner_index = gp.idx AND g.mode = 'bot')::int AS bot_wins
++           FROM game_players gp
++           JOIN games g ON g.id = gp.game_id
++          WHERE g.status = 'finished' AND NOT gp.is_bot
++          GROUP BY lower(gp.name)
++       ) t
++       ORDER BY wins DESC, wins::float / games DESC, games DESC, name
++       LIMIT 20`
++    );
++    const players = rows.map((r, i) => ({
++      rank: i + 1,
++      name: r.name,
++      games: r.games,
++      wins: r.wins,
++      botWins: r.bot_wins,
++      winRate: Math.round((r.wins / r.games) * 100),
++    }));
++    return { body: { players } };
++  },
++});
+diff --git a/api/player.js b/api/player.js
+new file mode 100644
+index 0000000..3434390
+--- /dev/null
++++ b/api/player.js
+@@ -0,0 +1,73 @@
++import { route, HttpError } from "./_lib/http.js";
++import { query } from "./_lib/db.js";
++import { cleanName } from "./_lib/game.js";
++
++// GET /api/player?name=Ada - one player's stats and their last 20 games.
++export default route({
++  async GET(req) {
++    if (typeof req.query.name !== "string") {
++      throw new HttpError(400, "Tell me which player to look up (?name=...).", "BAD_NAME");
++    }
++    const name = cleanName(req.query.name);
++
++    const { rows: history } = await query(
++      `SELECT g.id, g.finished_at, g.mode, g.difficulty, g.max_points,
++              (g.winner_index = me.idx) AS won,
++              me.name AS name, me.total_points AS score,
++              (SELECT json_agg(json_build_object(
++                        'name', o.name, 'score', o.total_points, 'isBot', o.is_bot)
++                      ORDER BY o.idx)
++                 FROM game_players o
++                WHERE o.game_id = g.id AND o.idx <> me.idx) AS opponents
++         FROM game_players me
++         JOIN games g ON g.id = me.game_id
++        WHERE lower(me.name) = lower($1) AND NOT me.is_bot AND g.status = 'finished'
++        ORDER BY g.finished_at DESC
++        LIMIT 20`,
++      [name]
++    );
++
++    const { rows: [totals] } = await query(
++      `SELECT count(*)::int AS games,
++              count(*) FILTER (WHERE g.winner_index = me.idx)::int AS wins,
++              count(*) FILTER (WHERE g.winner_index = me.idx AND g.mode = 'bot')::int AS bot_wins
++         FROM game_players me
++         JOIN games g ON g.id = me.game_id
++        WHERE lower(me.name) = lower($1) AND NOT me.is_bot AND g.status = 'finished'`,
++      [name]
++    );
++    if (totals.games === 0) {
++      throw new HttpError(404, `No finished games found for "${name}".`, "NO_PLAYER");
++    }
++
++    let streak = 0; // current winning streak, newest game first
++    for (const h of history) {
++      if (!h.won) break;
++      streak++;
++    }
++
++    return {
++      body: {
++        name: history[0].name,
++        stats: {
++          games: totals.games,
++          wins: totals.wins,
++          losses: totals.games - totals.wins,
++          winRate: Math.round((totals.wins / totals.games) * 100),
++          botWins: totals.bot_wins,
++          winStreak: streak,
++        },
++        history: history.map((h) => ({
++          gameId: h.id,
++          finishedAt: h.finished_at,
++          mode: h.mode,
++          difficulty: h.difficulty,
++          maxPoints: h.max_points,
++          won: h.won,
++          score: h.score,
++          opponents: h.opponents || [],
++        })),
++      },
++    };
++  },
++});
+diff --git a/src/api/client.js b/src/api/client.js
+index eb05d14..adb62f3 100644
+--- a/src/api/client.js
++++ b/src/api/client.js
+@@ -58,5 +58,7 @@ export const api = {
+   getGame: (id) => request(`/api/games/${id}`),
+   roll: (id, token) => request(`/api/games/${id}/roll`, { method: "POST", token }),
+   hold: (id, token) => request(`/api/games/${id}/hold`, { method: "POST", token }),
++  leaderboard: () => request("/api/leaderboard"),
++  player: (name) => request(`/api/player?name=${encodeURIComponent(name)}`),
+   botTurn: (id, token) => request(`/api/games/${id}/bot`, { method: "POST", token }),
+ };
+diff --git a/src/components/Navbar.jsx b/src/components/Navbar.jsx
+index cc5e3ee..457aaed 100644
+--- a/src/components/Navbar.jsx
++++ b/src/components/Navbar.jsx
+@@ -5,22 +5,36 @@ import { Link } from "react-router-dom";
+ export default function Navbar() {
+   return (
+     <nav className="sticky top-0 w-full flex justify-between py-2 px-4 md:px-[2%] md:py-[2%] text-white border-b border-b-[#ffffff80] backdrop-blur items-center">
+-      <a href={`/`} className="flex lg:gap-2 items-center">
++      <Link to={`/`} className="flex lg:gap-2 items-center">
+         <h1 className="pri-font text-base sm:text-lg md:text-xl lg:text-2xl xl:text-4xl ">
+           Greedy Pig
+         </h1>
+ 
+         <img src={logo} alt="logo" width={75} />
+-      </a>
++      </Link>
++      <Link
++        to={`/leaderboard`}
++        className=" text-[#ffffff] hover:underline duration-300 font-bold hidden md:flex"
++      >
++        Leaderboard
++      </Link>
+       <Link
+         to={`/live-game/how-to-play`}
+         className=" text-[#ffffff] hover:underline duration-300 font-bold hidden md:flex"
+       >
+         How To Play?
+       </Link>
++      <Link
++        to={`/leaderboard`}
++        className=" text-[#ffffff] font-bold flex md:hidden"
++        aria-label="Leaderboard"
++      >
++        🏆
++      </Link>
+       <Link
+         to={`/live-game/how-to-play`}
+         className=" text-[#ffffff] hover:underline duration-300 font-bold flex text-xl md:hidden"
++        aria-label="How to play"
+       >
+         ?
+       </Link>
+diff --git a/src/components/Page.jsx b/src/components/Page.jsx
+new file mode 100644
+index 0000000..2b9afd5
+--- /dev/null
++++ b/src/components/Page.jsx
+@@ -0,0 +1,33 @@
++import Navbar from "src/components/Navbar";
++
++// Shared frame for the simple content pages (leaderboard, player stats).
++export default function Page({ title, children }) {
++  return (
++    <div className="min-h-screen text-white">
++      <Navbar />
++      <div className="max-w-3xl mx-auto px-[5%] md:px-0 py-6 space-y-6">
++        <h2 className="pri-font text-3xl md:text-5xl text-center">{title}</h2>
++        {children}
++      </div>
++    </div>
++  );
++}
++
++export function LoadState({ loading, error, onRetry, children }) {
++  if (loading) {
++    return <p role="status" className="text-center py-10">Loading…</p>;
++  }
++  if (error) {
++    return (
++      <div role="alert" className="text-center space-y-4 py-6">
++        <p className="bg-[#D30C0C50] border border-[#f87171] rounded-lg px-4 py-2 inline-block">{error}</p>
++        <div>
++          <button onClick={onRetry} className="rounded px-8 py-3 bg-[#D30CBD] font-bold hover:scale-95 duration-300">
++            Try again
++          </button>
++        </div>
++      </div>
++    );
++  }
++  return children;
++}
+diff --git a/src/hooks/useApi.js b/src/hooks/useApi.js
+new file mode 100644
+index 0000000..cf7b222
+--- /dev/null
++++ b/src/hooks/useApi.js
+@@ -0,0 +1,22 @@
++import { useCallback, useEffect, useState } from "react";
++
++// Runs an API call on mount and exposes loading / error / retry state.
++export default function useApi(fn, deps = []) {
++  const [state, setState] = useState({ data: null, error: "", loading: true });
++  const [tick, setTick] = useState(0);
++  const reload = useCallback(() => setTick((n) => n + 1), []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setState((s) => ({ ...s, loading: true, error: "" }));
++    fn()
++      .then((data) => !cancelled && setState({ data, error: "", loading: false }))
++      .catch((err) => !cancelled && setState({ data: null, error: err.message, loading: false }));
++    return () => {
++      cancelled = true;
++    };
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [tick, ...deps]);
++
++  return { ...state, reload };
++}
+diff --git a/src/main.jsx b/src/main.jsx
+index 11612bd..a223e9c 100644
+--- a/src/main.jsx
++++ b/src/main.jsx
+@@ -9,6 +9,8 @@ import Home from "./routes/Home";
+ import HowToPlay from "./routes/HowToPlay";
+ import LiveGame from "./routes/play_friends_live/game/Game";
+ import LiveGamePage from "./routes/play_friends_live/LivePage";
++import Leaderboard from "./routes/Leaderboard";
++import PlayerStats from "./routes/PlayerStats";
+ 
+ const router = createBrowserRouter([
+   {
+@@ -34,6 +36,14 @@ const router = createBrowserRouter([
+             element: <HowToPlay />,
+           },
+         ]},
++      {
++        path: "leaderboard/",
++        element: <Leaderboard />,
++      },
++      {
++        path: "player/:name",
++        element: <PlayerStats />,
++      },
+       {
+         path: "/",
+         element: <Home />,
+diff --git a/src/routes/Home.jsx b/src/routes/Home.jsx
+index 7395933..b963f76 100644
+--- a/src/routes/Home.jsx
++++ b/src/routes/Home.jsx
+@@ -25,6 +25,12 @@ export default function Home() {
+           >
+             Play Friends (Live)
+           </Link>
++          <Link
++            to={`/leaderboard`}
++            className=" sec-font text-lg underline hover:text-[#d30cbc] duration-300"
++          >
++            Leaderboard &amp; Stats
++          </Link>
+         </div>
+       </div>
+     </section>
+diff --git a/src/routes/Leaderboard.jsx b/src/routes/Leaderboard.jsx
+new file mode 100644
+index 0000000..0f465a7
+--- /dev/null
++++ b/src/routes/Leaderboard.jsx
+@@ -0,0 +1,77 @@
++import { useState } from "react";
++import { Link, useNavigate } from "react-router-dom";
++import { api } from "src/api/client";
++import useApi from "src/hooks/useApi";
++import Page, { LoadState } from "src/components/Page";
++
++export default function Leaderboard() {
++  const { data, error, loading, reload } = useApi(() => api.leaderboard());
++  const [name, setName] = useState("");
++  const navigate = useNavigate();
++
++  function lookUp(e) {
++    e.preventDefault();
++    if (name.trim()) navigate(`/player/${encodeURIComponent(name.trim())}`);
++  }
++
++  return (
++    <Page title="Leaderboard">
++      <form onSubmit={lookUp} className="flex gap-2 justify-center">
++        <label htmlFor="player-search" className="sr-only">Look up a player</label>
++        <input
++          id="player-search"
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          placeholder="Look up a player's stats"
++          maxLength={24}
++          className="p-2 bg-[#ffffff20] border rounded-md w-full max-w-xs"
++        />
++        <button className="rounded px-4 bg-[#D30CBD] font-bold hover:scale-95 duration-300">Search</button>
++      </form>
++
++      <LoadState loading={loading} error={error} onRetry={reload}>
++        {data && data.players.length === 0 ? (
++          <div className="text-center space-y-4 py-6">
++            <p>No finished games yet. Be the first on the board!</p>
++            <Link to="/live-game/setup?mode=bot" className="inline-block rounded px-8 py-3 bg-[#D30CBD] font-bold">
++              Play now
++            </Link>
++          </div>
++        ) : (
++          <div className="overflow-x-auto bg-[#ffffff10] border rounded-lg">
++            <table className="w-full text-center">
++              <caption className="sr-only">Top players ranked by wins</caption>
++              <thead>
++                <tr className="bg-[#ffffff20] text-sm md:text-base">
++                  <th scope="col" className="p-3">#</th>
++                  <th scope="col" className="p-3 text-left">Player</th>
++                  <th scope="col" className="p-3">Wins</th>
++                  <th scope="col" className="p-3">Games</th>
++                  <th scope="col" className="p-3">Win rate</th>
++                  <th scope="col" className="p-3">Beat computer</th>
++                </tr>
++              </thead>
++              <tbody>
++                {data?.players.map((p) => (
++                  <tr key={p.name} className="border-t border-[#ffffff30]">
++                    <td className="p-3">{p.rank === 1 ? "🥇" : p.rank === 2 ? "🥈" : p.rank === 3 ? "🥉" : p.rank}</td>
++                    <td className="p-3 text-left">
++                      <Link to={`/player/${encodeURIComponent(p.name)}`} className="underline hover:text-[#D30CBD]">
++                        {p.name}
++                      </Link>
++                    </td>
++                    <td className="p-3 font-bold">{p.wins}</td>
++                    <td className="p-3">{p.games}</td>
++                    <td className="p-3">{p.winRate}%</td>
++                    <td className="p-3">{p.botWins}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++      </LoadState>
++      <p className="text-center text-sm text-[#ffffffa0]">Only finished games count. The computer is never ranked.</p>
++    </Page>
++  );
++}
+diff --git a/src/routes/PlayerStats.jsx b/src/routes/PlayerStats.jsx
+new file mode 100644
+index 0000000..7353606
+--- /dev/null
++++ b/src/routes/PlayerStats.jsx
+@@ -0,0 +1,71 @@
++import { Link, useParams } from "react-router-dom";
++import { api } from "src/api/client";
++import useApi from "src/hooks/useApi";
++import Page, { LoadState } from "src/components/Page";
++
++function Stat({ label, value }) {
++  return (
++    <div className="bg-[#ffffff10] border rounded-lg p-4 text-center">
++      <p className="text-3xl font-bold">{value}</p>
++      <p className="text-sm text-[#ffffffc0]">{label}</p>
++    </div>
++  );
++}
++
++function formatDate(iso) {
++  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
++}
++
++export default function PlayerStats() {
++  const { name } = useParams();
++  const { data, error, loading, reload } = useApi(() => api.player(name), [name]);
++
++  return (
++    <Page title={data?.name || name}>
++      <LoadState loading={loading} error={error} onRetry={reload}>
++        {data && (
++          <>
++            <section aria-label="Stats" className="grid grid-cols-2 md:grid-cols-3 gap-3">
++              <Stat label="Games played" value={data.stats.games} />
++              <Stat label="Wins" value={data.stats.wins} />
++              <Stat label="Losses" value={data.stats.losses} />
++              <Stat label="Win rate" value={`${data.stats.winRate}%`} />
++              <Stat label="Wins vs computer" value={data.stats.botWins} />
++              <Stat label="Current win streak" value={data.stats.winStreak} />
++            </section>
++
++            <section aria-label="Match history" className="space-y-2">
++              <h2 className="text-xl font-bold">Recent games</h2>
++              <ul className="space-y-2">
++                {data.history.map((g) => (
++                  <li key={g.gameId} className="bg-[#ffffff10] border rounded-lg p-3 flex items-center gap-3">
++                    <span
++                      className={`shrink-0 w-16 text-center rounded font-bold py-1 ${
++                        g.won ? "bg-[#16a34a60] text-[#bbf7d0]" : "bg-[#D30C0C60] text-[#fecaca]"
++                      }`}
++                    >
++                      {g.won ? "WIN" : "LOSS"}
++                    </span>
++                    <div className="grow text-sm md:text-base">
++                      <p>
++                        {g.score} pts vs{" "}
++                        {g.opponents.map((o) => `${o.name} (${o.score})`).join(", ")}
++                      </p>
++                      <p className="text-xs text-[#ffffffa0]">
++                        {g.mode === "bot" ? `Vs computer · ${g.difficulty}` : "With friends"} · first to {g.maxPoints} ·{" "}
++                        {formatDate(g.finishedAt)}
++                      </p>
++                    </div>
++                  </li>
++                ))}
++              </ul>
++            </section>
++          </>
++        )}
++      </LoadState>
++      <p className="text-center">
++        <Link to="/leaderboard" className="underline">← Back to leaderboard</Link>
++      </p>
++    </Page>
++  );
++}
+diff --git a/src/routes/play_friends_live/game/GameOver.jsx b/src/routes/play_friends_live/game/GameOver.jsx
+index 67fef9b..330b5fb 100644
+--- a/src/routes/play_friends_live/game/GameOver.jsx
++++ b/src/routes/play_friends_live/game/GameOver.jsx
+@@ -41,6 +41,12 @@ function GameOver({ playerData, currentPlayer, setIsContinue }) {
+         >
+           Home
+         </Link>
++        <Link
++          to={`/leaderboard`}
++          className="text-center text-[#ffffff] underline hover:text-[#d30cbc]"
++        >
++          View leaderboard &amp; stats
++        </Link>
+        <a href="https://forms.gle/skt5UKYGbDVzu2EL9" className="text-[#ffffff] underline text-center hover:text-[#d30cbc]" target="blank">feedback</a>
+       </section>
+     </div>
+diff --git a/tests/api.test.js b/tests/api.test.js
+index fbff3ff..263a1e6 100644
+--- a/tests/api.test.js
++++ b/tests/api.test.js
+@@ -181,3 +181,60 @@ test("vs computer: server plays the bot turn and blocks cheating", opts, async (
+   assert.ok(["bust", "hold", "win"].includes(bot.json.steps.at(-1).type));
+   assert.equal(bot.json.game.currentPlayer, bot.json.game.status === "finished" ? 1 : 0);
+ });
++
++async function playToTheEnd(api, id, token) {
++  const headers = { "x-game-token": token };
++  const botMod = (await import("../api/games/[id]/bot.js")).default;
++  for (let i = 0; i < 2000; i++) {
++    const g = (await call(api.get, { query: { id } })).json.game;
++    if (g.status === "finished") return g;
++    const r = g.players[g.currentPlayer].isBot
++      ? await call(botMod, { method: "POST", query: { id }, headers })
++      : await call(api.roll, { method: "POST", query: { id }, headers });
++    assert.equal(r.status, 200);
++  }
++  throw new Error("game never finished");
++}
++
++test("leaderboard and player history reflect finished games", opts, async () => {
++  const api = await load();
++  const board = (await import("../api/leaderboard.js")).default;
++  const player = (await import("../api/player.js")).default;
++  const name = `Tester${Date.now() % 100000}`;
++
++  // Unknown player -> clean 404, missing/invalid name -> 400
++  assert.equal((await call(player, { query: { name } })).status, 404);
++  assert.equal((await call(player, { query: {} })).status, 400);
++  assert.equal((await call(player, { query: { name: "   " } })).status, 400);
++
++  // Play two complete games vs the computer
++  for (let n = 0; n < 2; n++) {
++    const created = await call(api.create, {
++      method: "POST",
++      body: { mode: "bot", difficulty: "easy", maxPoints: 25, players: [{ name }] },
++    });
++    await playToTheEnd(api, created.json.game.id, created.json.token);
++  }
++  // An unfinished game must not count
++  await call(api.create, { method: "POST", body: { mode: "bot", maxPoints: 25, players: [{ name }] } });
++
++  const p = await call(player, { query: { name: name.toLowerCase() } }); // case-insensitive
++  assert.equal(p.status, 200);
++  assert.equal(p.json.stats.games, 2);
++  assert.equal(p.json.stats.wins + p.json.stats.losses, 2);
++  assert.equal(p.json.history.length, 2);
++  assert.equal(p.json.history[0].opponents[0].isBot, true);
++  assert.equal(p.json.history[0].opponents[0].name, "Computer (Easy)");
++  assert.equal(p.json.stats.winRate, Math.round((p.json.stats.wins / 2) * 100));
++
++  const lb = await call(board);
++  assert.equal(lb.status, 200);
++  const row = lb.json.players.find((r) => r.name === name);
++  // The board is limited to the top 20, so only check the row if present.
++  if (row) {
++    assert.equal(row.games, 2);
++    assert.equal(row.wins, p.json.stats.wins);
++  }
++  assert.ok(lb.json.players.every((r, i) => r.rank === i + 1));
++  assert.ok(lb.json.players.every((r) => r.name !== "Computer (Easy)"), "bots are never ranked");
++});

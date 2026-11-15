@@ -1,0 +1,650 @@
+diff --git a/README.md b/README.md
+index 45d8565..fadde99 100644
+--- a/README.md
++++ b/README.md
+@@ -27,7 +27,20 @@ Now a real backend owns the game:
+   same game are serialised with a row lock, and holding with nothing rolled is rejected.
+ - **Resumable games.** Refreshing the page reloads the game from the database.
+ 
+-(The three headline improvements are described in the sections below as they are completed.)
++## Improvement 1 – Computer opponents (Easy / Medium / Hard)
++
++Choose **Vs computer** on the setup screen and pick a difficulty. The bot's decisions are made on the
++server (`botShouldHold` in `api/_lib/game.js`), so its strategy can't be inspected or tampered with
++from the browser. The server returns the bot's full turn as a list of steps and the browser replays
++them with the dice animation.
++
++| Level | Strategy |
++| ----- | -------- |
++| Easy | Banks erratically, somewhere between 8 and 13 turn points |
++| Medium | The classic "hold at 20" strategy |
++| Hard | Banks at 20, but takes more risk (30) when you are within 25 points of winning, plays safe (15) when it leads by 25+, and always keeps rolling when it is 10 or fewer points from winning |
++
++(Improvements 2 and 3 are described below as they are completed.)
+ 
+ ## API
+ 
+@@ -38,6 +51,7 @@ Now a real backend owns the game:
+ | GET | `/api/games/:id` | Current state of a game |
+ | POST | `/api/games/:id/roll` | Server rolls the die for the current player |
+ | POST | `/api/games/:id/hold` | Bank the running points and pass the turn |
++| POST | `/api/games/:id/bot` | Server plays the computer's whole turn and returns every step |
+ 
+ Errors always look like `{ "error": { "code": "...", "message": "..." } }`.
+ 
+diff --git a/api/_lib/game.js b/api/_lib/game.js
+index 5caa830..72305d1 100644
+--- a/api/_lib/game.js
++++ b/api/_lib/game.js
+@@ -185,3 +185,58 @@ export function applyHold(state) {
+   s.currentPlayer = (who + 1) % s.players.length;
+   return { state: s, event: { type: "hold", player: who, banked } };
+ }
++
++// ---------- computer opponent ----------
++// Decides whether the bot should bank its points instead of rolling again.
++// `rng(min, max)` returns an integer min..max-1 (injectable for tests).
++export function botShouldHold(difficulty, state, rng = randomInt) {
++  const me = state.players[state.currentPlayer];
++  const running = me.running;
++  if (running === 0) return false; // must roll at least once
++
++  if (difficulty === "easy") {
++    // Erratic: banks anywhere between 8 and 13 points, re-decided each roll.
++    return running >= 8 + rng(0, 6);
++  }
++  if (difficulty === "medium") {
++    return running >= 20; // classic "hold at 20" strategy
++  }
++
++  // hard: adapts to the score situation
++  const remaining = state.maxPoints - (me.total + running);
++  if (remaining <= 10) return false; // one or two rolls from winning: go for it
++  const bestOpponent = Math.max(
++    ...state.players.filter((_, i) => i !== state.currentPlayer).map((p) => p.total)
++  );
++  let threshold = 20;
++  if (bestOpponent >= state.maxPoints - 25) threshold = 30; // they are close: take risks
++  else if (me.total - bestOpponent >= 25) threshold = 15; // comfortably ahead: play safe
++  return running >= threshold;
++}
++
++// Plays a whole bot turn. Returns the new state and every step so the browser
++// can replay it with animation: [{ type, value?, running, banked? }].
++export function playBotTurn(state, difficulty, rng = randomInt, roller = rollDie) {
++  if (state.status !== "active" || !state.players[state.currentPlayer].isBot) {
++    throw new HttpError(409, "It is not the computer's turn.", "NOT_BOT_TURN");
++  }
++  const who = state.currentPlayer;
++  let current = state;
++  const steps = [];
++  const events = [];
++  for (let i = 0; i < 100; i++) {
++    const { state: afterRoll, event } = applyRoll(current, roller(rng));
++    current = afterRoll;
++    events.push(event);
++    steps.push({ ...event, running: current.players[who].running });
++    if (event.type !== "roll") break; // bust or win ends the turn
++    if (botShouldHold(difficulty, current, rng)) {
++      const { state: afterHold, event: holdEvent } = applyHold(current);
++      current = afterHold;
++      events.push(holdEvent);
++      steps.push({ ...holdEvent, running: 0 });
++      break;
++    }
++  }
++  return { state: current, steps, events };
++}
+diff --git a/api/games/[id]/bot.js b/api/games/[id]/bot.js
+new file mode 100644
+index 0000000..1af7881
+--- /dev/null
++++ b/api/games/[id]/bot.js
+@@ -0,0 +1,21 @@
++import { route, parseGameId } from "../../_lib/http.js";
++import { withTransaction } from "../../_lib/db.js";
++import { playBotTurn } from "../../_lib/game.js";
++import { loadGame, toState, toPublic, assertToken, saveState } from "../../_lib/repo.js";
++
++// POST /api/games/:id/bot - the server plays the computer's whole turn.
++// Returns every step (so the browser can animate it) and the final game.
++export default route({
++  async POST(req) {
++    const id = parseGameId(req.query.id);
++    const body = await withTransaction(async (client) => {
++      const { game, playerRows } = await loadGame(client, id, { lock: true });
++      assertToken(req, game);
++      const { state, steps, events } = playBotTurn(toState(game, playerRows), game.difficulty);
++      await saveState(client, id, state, events);
++      const fresh = await loadGame(client, id);
++      return { steps, game: toPublic(fresh.game, fresh.playerRows) };
++    });
++    return { body };
++  },
++});
+diff --git a/src/api/client.js b/src/api/client.js
+index 2d142d7..eb05d14 100644
+--- a/src/api/client.js
++++ b/src/api/client.js
+@@ -58,4 +58,5 @@ export const api = {
+   getGame: (id) => request(`/api/games/${id}`),
+   roll: (id, token) => request(`/api/games/${id}/roll`, { method: "POST", token }),
+   hold: (id, token) => request(`/api/games/${id}/hold`, { method: "POST", token }),
++  botTurn: (id, token) => request(`/api/games/${id}/bot`, { method: "POST", token }),
+ };
+diff --git a/src/routes/Home.jsx b/src/routes/Home.jsx
+index e5ea09e..7395933 100644
+--- a/src/routes/Home.jsx
++++ b/src/routes/Home.jsx
+@@ -13,18 +13,12 @@ export default function Home() {
+           Greedy Pig
+         </h1>
+         <div className="flex gap-4 flex-col">
+-          {/* <Link
+-            to={`/play-computer`}
+-            className=" sec-font text-xl rounded px-8 py-4 bg-[#d30cbcc0] font-bold duration-500 skew-x-6 hover:skew-x-0 hover:scale-95 hover:bg-[#d30cbc] "
+-          >
+-            Play Computer
+-          </Link>
+           <Link
+-            to={`/play-remote-game`}
++            to={`/live-game/setup?mode=bot`}
+             className=" sec-font text-xl rounded px-8 py-4 bg-[#d30cbcc0] font-bold duration-500 -skew-x-6 hover:bg-[#d30cbc] hover:skew-x-0 hover:scale-95  "
+           >
+-            Play Friends (Remote)
+-          </Link> */}
++            Play vs Computer
++          </Link>
+           <Link
+             to={`/live-game/setup`}
+             className=" sec-font text-xl rounded px-8 py-4 bg-[#d30cbcc0] font-bold duration-500 skew-x-6 hover:bg-[#d30cbc] hover:skew-x-0 hover:scale-95 "
+diff --git a/src/routes/play_friends_live/LivePage.jsx b/src/routes/play_friends_live/LivePage.jsx
+index a4197ea..dc517fb 100644
+--- a/src/routes/play_friends_live/LivePage.jsx
++++ b/src/routes/play_friends_live/LivePage.jsx
+@@ -13,6 +13,8 @@ import celebrationSound from "src/sound_effect/celebration.mp3";
+ import invalidSound from "src/sound_effect/invalid.mp3";
+ 
+ const ROLL_MS = 1500; // how long the die "tumbles" before showing the server's number
++const BOT_ROLL_MS = 900; // the computer's rolls are quicker so its turn does not drag
++const BOT_PAUSE_MS = 600;
+ const GAME_OVER_DELAY_MS = 1000;
+ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+ 
+@@ -31,6 +33,7 @@ function LivePage() {
+     getInitialPlayerData(preloadSrcList.slice(0, 9), pigPetNames)
+   );
+   const [maxPoints, setMaxPoints] = useState(100);
++  const [difficulty, setDifficulty] = useState("medium");
+ 
+   // In-game state (always a copy of what the server says)
+   const [playerData, setPlayerData] = useState([]);
+@@ -135,6 +138,7 @@ function LivePage() {
+     setIsRolling(true);
+     setChangeBackground(true);
+     playSound(rollAudio);
++    let next = null;
+     try {
+       // Wait for BOTH the server's answer and the tumble animation.
+       const [res] = await Promise.all([api.roll(s.id, s.token), sleep(ROLL_MS)]);
+@@ -143,6 +147,7 @@ function LivePage() {
+       const [text, kind] = describe(res.event, res.game);
+       say(text, kind);
+       if (res.event.type === "bust") playSound(loseAudio);
++      next = res.game;
+     } catch (err) {
+       await handleActionError(err);
+     } finally {
+@@ -154,6 +159,7 @@ function LivePage() {
+         setBusy(false);
+       }
+     }
++    if (isMounted.current && isComputersTurn(next)) await runBotTurn();
+   }
+ 
+   async function hold() {
+@@ -166,6 +172,7 @@ function LivePage() {
+     }
+     busyRef.current = true;
+     setBusy(true);
++    let next = null;
+     try {
+       const res = await api.hold(s.id, s.token);
+       if (!isMounted.current) return;
+@@ -173,20 +180,101 @@ function LivePage() {
+       applyGame(res.game);
+       const [text, kind] = describe(res.event, res.game);
+       say(text, kind);
++      next = res.game;
+     } catch (err) {
+       await handleActionError(err);
+     } finally {
+       busyRef.current = false;
+       if (isMounted.current) setBusy(false);
+     }
++    if (isMounted.current && isComputersTurn(next)) await runBotTurn();
++  }
++
++  function isComputersTurn(game) {
++    return Boolean(game) && game.status === "active" && game.players[game.currentPlayer].isBot;
++  }
++
++  // The SERVER plays the computer's whole turn and returns every step; we
++  // just replay those steps with the dice animation so it feels like a player.
++  async function runBotTurn() {
++    const { session: s } = latest.current;
++    if (busyRef.current || !s) return;
++    busyRef.current = true;
++    setBusy(true);
++    say("The computer is thinking…");
++    try {
++      const [res] = await Promise.all([api.botTurn(s.id, s.token), sleep(700)]);
++      const botIndex = res.steps[0].player;
++      const name = res.game.players[botIndex].name;
++      for (const step of res.steps) {
++        if (!isMounted.current) return;
++        if (step.type === "hold") {
++          await sleep(BOT_PAUSE_MS / 2);
++          playSound(addPlayerAudio);
++          setPlayerData((prev) =>
++            prev.map((p, i) =>
++              i === botIndex
++                ? { ...p, total_points: p.total_points + step.banked, running_points: 0 }
++                : p
++            )
++          );
++          say(`${name} banked ${step.banked} points. Your turn!`, "good");
++          continue;
++        }
++        setIsRolling(true);
++        setChangeBackground(true);
++        playSound(rollAudio);
++        await sleep(BOT_ROLL_MS);
++        rollAudio?.pause();
++        if (!isMounted.current) return;
++        setIsRolling(false);
++        setChangeBackground(false);
++        setDiceValue(step.value);
++        if (step.type === "roll") {
++          setPlayerData((prev) =>
++            prev.map((p, i) => (i === botIndex ? { ...p, running_points: step.running } : p))
++          );
++          say(`${name} rolled a ${step.value}. Turn total: ${step.running}.`);
++          await sleep(BOT_PAUSE_MS);
++        } else if (step.type === "bust") {
++          playSound(loseAudio);
++          setPlayerData((prev) =>
++            prev.map((p, i) => (i === botIndex ? { ...p, running_points: 0 } : p))
++          );
++          say(`${name} rolled a 1 and lost this turn's points. Your turn!`, "bad");
++        } else if (step.type === "win") {
++          say(`${name} rolled a ${step.value} and wins with ${res.game.maxPoints} points!`, "bad");
++        }
++      }
++      applyGame(res.game); // the server's version is the final truth
++    } catch (err) {
++      await handleActionError(err);
++    } finally {
++      busyRef.current = false;
++      rollAudio?.pause();
++      if (isMounted.current) {
++        setIsRolling(false);
++        setChangeBackground(false);
++        setBusy(false);
++      }
++    }
++  }
++
++  // If the page was refreshed during the computer's turn, carry on with it.
++  function resumeBotIfNeeded() {
++    const { playerData: players, currentPlayer: cp, isGameOver: over } = latest.current;
++    if (!over && players[cp]?.is_bot) runBotTurn();
+   }
+ 
+   // Called by the Setup screen. Throws an ApiError if the server says no.
+   async function startGame({ mode = "friends" } = {}) {
++    // Against the computer there is one human; the server adds the bot.
++    const humans = mode === "bot" ? setupPlayers.slice(0, 1) : setupPlayers;
+     const payload = {
+       mode,
++      difficulty: mode === "bot" ? difficulty : undefined,
+       maxPoints: Number(maxPoints),
+-      players: setupPlayers.map((p) => ({
++      players: humans.map((p) => ({
+         name: p.name.trim() || p.tag,
+         avatar: p.pig_index,
+       })),
+@@ -249,6 +337,8 @@ function LivePage() {
+             setSetupPlayers,
+             maxPoints,
+             setMaxPoints,
++            difficulty,
++            setDifficulty,
+             // game
+             playerData,
+             setPlayerData,
+@@ -264,6 +354,7 @@ function LivePage() {
+             hold,
+             startGame,
+             loadSavedGame,
++            resumeBotIfNeeded,
+             // ui
+             isRolling,
+             busy,
+diff --git a/src/routes/play_friends_live/game/Game.jsx b/src/routes/play_friends_live/game/Game.jsx
+index 8a93cec..ff6896c 100644
+--- a/src/routes/play_friends_live/game/Game.jsx
++++ b/src/routes/play_friends_live/game/Game.jsx
+@@ -18,6 +18,7 @@ export default function LiveGame() {
+     isGameOver,
+     setIsContinue,
+     loadSavedGame,
++    resumeBotIfNeeded,
+     setMessage,
+   } = useLiveGameContext();
+   const navigate = useNavigate();
+@@ -54,6 +55,12 @@ export default function LiveGame() {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [attempt]);
+ 
++  const isLoaded = playerData.length > 0;
++  useEffect(() => {
++    if (isLoaded) resumeBotIfNeeded();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [isLoaded]);
++
+   if (playerData.length === 0) {
+     return (
+       <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-white p-4 text-center">
+diff --git a/src/routes/play_friends_live/setup/Setup.jsx b/src/routes/play_friends_live/setup/Setup.jsx
+index 078a6da..700b9c8 100644
+--- a/src/routes/play_friends_live/setup/Setup.jsx
++++ b/src/routes/play_friends_live/setup/Setup.jsx
+@@ -4,7 +4,7 @@ import { useLiveGameContext } from "src/context/useLiveGameContext";
+ import AddPlayerButton from "./components/AddPlayerButton";
+ import NameInput from "./components/NameInput";
+ import ImageSlider from "./components/ImageSlider";
+-import { useNavigate } from "react-router-dom";
++import { useNavigate, useSearchParams } from "react-router-dom";
+ import { getInitialPlayerData } from "src/utils/live_game/getInitialData";
+ import SoundSwitch from "src/components/SoundSwitch";
+ import { useGreedyPigContext } from "src/context/useGreedyPigContext";
+@@ -12,6 +12,33 @@ import { useGreedyPigContext } from "src/context/useGreedyPigContext";
+ const MIN_POINTS = 25;
+ const MAX_POINTS = 500;
+ 
++const DIFFICULTIES = [
++  { value: "easy", label: "Easy", hint: "Banks early and a bit randomly" },
++  { value: "medium", label: "Medium", hint: "Banks once it has 20 points" },
++  { value: "hard", label: "Hard", hint: "Adapts to the score and takes risks when you are close" },
++];
++
++function Segmented({ legend, options, value, onChange }) {
++  return (
++    <div role="radiogroup" aria-label={legend} className="flex rounded-lg border border-[#ffffff60] overflow-hidden">
++      {options.map((o) => (
++        <button
++          key={o.value}
++          type="button"
++          role="radio"
++          aria-checked={value === o.value}
++          onClick={() => onChange(o.value)}
++          className={`px-5 py-2 font-semibold duration-200 ${
++            value === o.value ? "bg-[#D30CBD]" : "bg-[#ffffff10] hover:bg-[#ffffff30]"
++          }`}
++        >
++          {o.label}
++        </button>
++      ))}
++    </div>
++  );
++}
++
+ function LiveGameSetup() {
+   const {
+     setupPlayers,
+@@ -20,8 +47,13 @@ function LiveGameSetup() {
+     setMaxPoints,
+     startGame,
+     isContinue,
++    difficulty,
++    setDifficulty,
+   } = useLiveGameContext();
+   const navigate = useNavigate();
++  const [params, setParams] = useSearchParams();
++  const mode = params.get("mode") === "bot" ? "bot" : "friends";
++  const setMode = (m) => setParams(m === "bot" ? { mode: "bot" } : {}, { replace: true });
+   const { preloadSrcList, pigPetNames } = useGreedyPigContext();
+   const pigs = preloadSrcList.filter((pig) => pig.includes("pig"));
+   const [isStarting, setIsStarting] = useState(false);
+@@ -42,7 +74,7 @@ function LiveGameSetup() {
+     }
+     setIsStarting(true);
+     try {
+-      await startGame({ mode: "friends" });
++      await startGame({ mode });
+       navigate("/live-game/game");
+     } catch (err) {
+       setError(err.message);
+@@ -64,6 +96,30 @@ function LiveGameSetup() {
+       <main className="">
+         <Navbar />
+         <div className="flex flex-col items-center gap-8 text-white px-[5%] md:px-[10%] py-4 ">
++          <section className="flex flex-col items-center gap-4">
++            <Segmented
++              legend="Game mode"
++              value={mode}
++              onChange={setMode}
++              options={[
++                { value: "friends", label: "With friends" },
++                { value: "bot", label: "Vs computer" },
++              ]}
++            />
++            {mode === "bot" && (
++              <>
++                <Segmented
++                  legend="Computer difficulty"
++                  value={difficulty}
++                  onChange={setDifficulty}
++                  options={DIFFICULTIES}
++                />
++                <p className="text-sm text-[#ffffffc0]" aria-live="polite">
++                  {DIFFICULTIES.find((d) => d.value === difficulty)?.hint}
++                </p>
++              </>
++            )}
++          </section>
+           <section className="flex flex-col">
+             <label htmlFor="max-score">Max Score</label>
+             <input
+@@ -89,7 +145,7 @@ function LiveGameSetup() {
+           </section>
+           <div className=" w-full  gap-2 flow-root">
+             <section className="max-h-[350px] w-full overflow-y-auto bg-[#ffffff10] border rounded-lg p-4 grid grid-cols-fluid justify-center gap-4">
+-              {[...setupPlayers].map((player, index) => (
++              {(mode === "bot" ? setupPlayers.slice(0, 1) : [...setupPlayers]).map((player, index) => (
+                 <div
+                   key={player.id}
+                   className=" flex flex-col w-full items-center  gap-2 p-2 rounded-lg border border-[#FFFFFF40] hover:border-[#ffffff80] duration-300"
+@@ -99,14 +155,24 @@ function LiveGameSetup() {
+                 </div>
+               ))}
+ 
+-              <AddPlayerButton />
++              {mode === "bot" ? (
++                <div className="flex flex-col w-full items-center justify-center gap-2 p-2 rounded-lg border border-dashed border-[#FFFFFF60]">
++                  <img src={pigs[5]} alt="" width={120} />
++                  <p className="text-lg font-medium capitalize">Computer ({difficulty})</p>
++                  <p className="text-xs text-[#ffffffa0]">Your opponent</p>
++                </div>
++              ) : (
++                <AddPlayerButton />
++              )}
+             </section>
+-            <button
+-              className="text-right text-xs p-2 bg-[#D30C0C40] text-[#ffffff] w-fit border border-[#D30C0C80] duration-300 hover:bg-[#D30C0C80]   hover:border-[#D30C0C] rounded float-right mt-2"
+-              onClick={clearsPlayers}
+-            >
+-              Clear Players
+-            </button>
++            {mode === "friends" && (
++              <button
++                className="text-right text-xs p-2 bg-[#D30C0C40] text-[#ffffff] w-fit border border-[#D30C0C80] duration-300 hover:bg-[#D30C0C80]   hover:border-[#D30C0C] rounded float-right mt-2"
++                onClick={clearsPlayers}
++              >
++                Clear Players
++              </button>
++            )}
+             <SoundSwitch />
+           </div>
+           {error && (
+diff --git a/tests/api.test.js b/tests/api.test.js
+index ee7dfc4..fbff3ff 100644
+--- a/tests/api.test.js
++++ b/tests/api.test.js
+@@ -138,3 +138,46 @@ test("simultaneous rolls are applied one at a time (no lost updates)", opts, asy
+     assert.equal(p.runningPoints, replay.players[i].running);
+   });
+ });
++
++test("vs computer: server plays the bot turn and blocks cheating", opts, async () => {
++  const api = await load();
++  const botMod = (await import("../api/games/[id]/bot.js")).default;
++  const created = await call(api.create, {
++    method: "POST",
++    body: { mode: "bot", difficulty: "medium", maxPoints: 100, players: [{ name: "Ada" }] },
++  });
++  assert.equal(created.status, 201, JSON.stringify(created.json));
++  const { id } = created.json.game;
++  const headers = { "x-game-token": created.json.token };
++  assert.equal(created.json.game.players[1].isBot, true);
++
++  // Bot can't be asked to play during the human's turn.
++  let r = await call(botMod, { method: "POST", query: { id }, headers });
++  assert.equal(r.status, 409);
++
++  // Human rolls until the turn passes to the computer.
++  for (let i = 0; i < 100; i++) {
++    r = await call(api.roll, { method: "POST", query: { id }, headers });
++    if (r.json.game.currentPlayer === 1 || r.json.game.status === "finished") break;
++    if (r.json.game.players[0].runningPoints >= 6) {
++      r = await call(api.hold, { method: "POST", query: { id }, headers });
++      break;
++    }
++  }
++  assert.equal(r.json.game.currentPlayer, 1);
++
++  // Human can't roll or hold for the computer.
++  for (const handler of [api.roll, api.hold]) {
++    const bad = await call(handler, { method: "POST", query: { id }, headers });
++    assert.equal(bad.status, 409);
++  }
++  // Wrong token can't trigger the bot.
++  const noToken = await call(botMod, { method: "POST", query: { id }, headers: { "x-game-token": "x" } });
++  assert.equal(noToken.status, 403);
++
++  const bot = await call(botMod, { method: "POST", query: { id }, headers });
++  assert.equal(bot.status, 200);
++  assert.ok(bot.json.steps.length >= 1);
++  assert.ok(["bust", "hold", "win"].includes(bot.json.steps.at(-1).type));
++  assert.equal(bot.json.game.currentPlayer, bot.json.game.status === "finished" ? 1 : 0);
++});
+diff --git a/tests/game.test.js b/tests/game.test.js
+index ae740d4..3105e09 100644
+--- a/tests/game.test.js
++++ b/tests/game.test.js
+@@ -115,3 +115,94 @@ test("validateNewGame rejects bad input", () => {
+     assert.throws(() => validateNewGame(body), (e) => e.status === 400, JSON.stringify(body));
+   }
+ });
++
++// ---------- bot ----------
++import { botShouldHold, playBotTurn } from "../api/_lib/game.js";
++import { fixedRolls } from "./helpers.js";
++
++const vsBot = (maxPoints = 100) =>
++  newState({ maxPoints, players: [{ name: "Ada", isBot: false }, { name: "Computer", isBot: true }] });
++
++function botTurnState(running, total = 0, oppTotal = 0, maxPoints = 100) {
++  const s = vsBot(maxPoints);
++  s.currentPlayer = 1;
++  s.players[1].running = running;
++  s.players[1].total = total;
++  s.players[0].total = oppTotal;
++  return s;
++}
++
++test("bot never holds with nothing rolled", () => {
++  for (const d of ["easy", "medium", "hard"]) {
++    assert.equal(botShouldHold(d, botTurnState(0)), false);
++  }
++});
++
++test("medium bot holds at 20 and not before", () => {
++  assert.equal(botShouldHold("medium", botTurnState(19)), false);
++  assert.equal(botShouldHold("medium", botTurnState(20)), true);
++});
++
++test("easy bot holds between 8 and 13 depending on its random pick", () => {
++  assert.equal(botShouldHold("easy", botTurnState(8), () => 0), true);
++  assert.equal(botShouldHold("easy", botTurnState(12), () => 5), false);
++  assert.equal(botShouldHold("easy", botTurnState(13), () => 5), true);
++});
++
++test("hard bot takes more risk when the opponent is close to winning", () => {
++  assert.equal(botShouldHold("hard", botTurnState(22, 0, 10)), true);
++  assert.equal(botShouldHold("hard", botTurnState(22, 0, 80)), false);
++  assert.equal(botShouldHold("hard", botTurnState(30, 0, 80)), true);
++});
++
++test("hard bot plays safe when well ahead and keeps rolling near the win", () => {
++  assert.equal(botShouldHold("hard", botTurnState(15, 50, 10)), true);
++  assert.equal(botShouldHold("hard", botTurnState(15, 60, 10, 100)), true);
++  assert.equal(botShouldHold("hard", botTurnState(15, 75, 10, 100)), false); // 10 from winning
++});
++
++test("a bot turn ends with a hold once the threshold is reached", () => {
++  // medium: rolls 6,6,6,2 = 20 -> holds
++  const { state, steps } = playBotTurn(botTurnState(0), "medium", undefined, fixedRolls(6, 6, 6, 2));
++  assert.deepEqual(steps.map((s) => s.type), ["roll", "roll", "roll", "roll", "hold"]);
++  assert.equal(state.players[1].total, 20);
++  assert.equal(state.currentPlayer, 0);
++});
++
++test("a bot turn ends at once when it rolls a 1", () => {
++  const { state, steps } = playBotTurn(botTurnState(0), "medium", undefined, fixedRolls(5, 1));
++  assert.deepEqual(steps.map((s) => s.type), ["roll", "bust"]);
++  assert.equal(state.players[1].total, 0);
++  assert.equal(state.currentPlayer, 0);
++});
++
++test("a bot can win the game", () => {
++  const { state, steps } = playBotTurn(botTurnState(0, 90), "hard", undefined, fixedRolls(6, 4));
++  assert.equal(steps.at(-1).type, "win");
++  assert.equal(state.status, "finished");
++  assert.equal(state.winnerIndex, 1);
++});
++
++test("playBotTurn refuses when it is a human's turn", () => {
++  assert.throws(() => playBotTurn(vsBot(), "easy"), (e) => e.status === 409);
++});
++
++test("every difficulty always finishes a turn with real dice", () => {
++  for (const d of ["easy", "medium", "hard"]) {
++    for (let i = 0; i < 300; i++) {
++      const { state } = playBotTurn(botTurnState(0), d);
++      assert.ok(state.currentPlayer === 0 || state.status === "finished");
++    }
++  }
++});
++
++test("validateNewGame builds the bot opponent", () => {
++  const g = validateNewGame({ mode: "bot", difficulty: "hard", players: [{ name: "Ada" }] });
++  assert.equal(g.players.length, 2);
++  assert.deepEqual(
++    [g.players[1].isBot, g.players[1].name, g.difficulty],
++    [true, "Computer (Hard)", "hard"]
++  );
++  assert.throws(() => validateNewGame({ mode: "bot", difficulty: "insane", players: [{ name: "A" }] }));
++  assert.throws(() => validateNewGame({ mode: "bot", players: [{ name: "A" }, { name: "B" }] }));
++});

@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Raleway:wght@100;200;300;400;500;600;700;800;900&family=Titan+One&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.pri-font {
+  font-family: "Titan One", cursive;
+}
+
+.sec-font {
+  font-family: 'Raleway', sans-serif;
+}
+
+::-webkit-scrollbar {
+  /* Customize the scrollbar width */
+  width: 0px;
+}
+
+::-webkit-scrollbar-track {
+  /* Customize the scrollbar track */
+  width: 0px;
+}
+
+::-webkit-scrollbar-thumb {
+  /* Customize the scrollbar thumb */
+}
+
+/* Accessibility: always show where keyboard focus is */
+:focus-visible {
+  outline: 3px solid #ffd700;
+  outline-offset: 2px;
+}
+
+/* Accessibility: respect "reduce motion" system settings */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
